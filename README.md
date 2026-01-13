@@ -43,5 +43,5 @@ Bu projeyi bilgisayarınızda çalıştırmak için aşağıdaki adımları izle
 
 ### 1. Projeyi İndirin
 ```bash
-git clone [https://github.com/Aloneangel20/FocusFlow.git](https://github.com/Aloneangel20/FocusFlow.git)
+git clone [[https://github.com/Aloneangel20/FocusFlow.git](https://github.com/Aloneangel20/FocusFlow.git)](https://github.com/aloneangel45/FocusFlow.git)
 cd FocusFlow

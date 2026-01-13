@@ -37,11 +37,25 @@ Geleneksel site engelleyiciler kolayca kapatılabilir. FocusFlow ise **sistem se
 
 ---
 
-## 🛠️ Kurulum ve Kullanım
+👨‍💻 GELİŞTİRİCİ KILAVUZU (Kodu Değiştirmek İçin)
+Bu projeyi kendi bilgisayarınızda geliştirmek, yeni özellikler eklemek veya kaynak kodundan çalıştırmak istiyorsanız aşağıdaki adımları izleyin.
 
-Bu projeyi bilgisayarınızda çalıştırmak için aşağıdaki adımları izleyin:
+1. Gereksinimler
+Bilgisayarınızda Python 3.x yüklü olmalıdır. Ayrıca kurulum sırasında "Add Python to PATH" seçeneğinin işaretli olduğundan emin olun.
 
-### 1. Projeyi İndirin
-```bash
-git clone [[https://github.com/Aloneangel20/FocusFlow.git](https://github.com/Aloneangel20/FocusFlow.git)](https://github.com/aloneangel45/FocusFlow.git)
-cd FocusFlow
+2. Projeyi İndirin (Klonlayın)
+Direkt projenin üstünde zip olarak indrerek python dosyasını indirin sonrasında
+
+
+3. Gerekli Kütüphaneleri Yükleyin
+Projenin çalışması için aşağıdaki kütüphanelere ihtiyacı vardır. Terminale şunu yapıştırın:
+
+
+pip install tk Pillow psutil pyautogui eğer pip çalışmıyor ise py kullanabilirsiniz powershell veya cmd olur 
+
+4. Kodu Çalıştırma
+Projeyi çalıştırmak için cmd yönetici olarak çalıştır sonrasında cd yaz sonrasına dosyanın olduğu dosya yolunu yapıştır 
+
+Terminalden sonrasında alttakini yapıştırarak çalıştırabilirsiniz
+
+FocusFlowV1.py

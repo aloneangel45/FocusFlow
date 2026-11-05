@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -46,7 +47,7 @@ func main() {
 	case "remove", "rm":
 		handleRemove(os.Args[2:])
 	case "version", "--version", "-v":
-		fmt.Printf("FocusFlow v%s (Windows Win32 Native)\n", Version)
+		fmt.Printf("FocusFlow v%s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 	default:
 		tui.PrintBanner()
 		fmt.Printf("Unknown command: %s\n\n", command)

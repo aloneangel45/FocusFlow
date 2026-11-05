@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Release FocusFlow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          check-latest: false
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build cross-platform binaries
+        run: |
+          mkdir -p dist
+          
+          # Windows amd64
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusflow-windows-amd64.exe ./cmd/focusflow
+          (cd dist && zip focusflow-windows-amd64.zip focusflow-windows-amd64.exe)
+          
+          # Linux amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusflow-linux-amd64 ./cmd/focusflow
+          tar -czvf dist/focusflow-linux-amd64.tar.gz -C dist focusflow-linux-amd64
+          
+          # Linux arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusflow-linux-arm64 ./cmd/focusflow
+          tar -czvf dist/focusflow-linux-arm64.tar.gz -C dist focusflow-linux-arm64
+          
+          # macOS amd64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusflow-darwin-amd64 ./cmd/focusflow
+          tar -czvf dist/focusflow-darwin-amd64.tar.gz -C dist focusflow-darwin-amd64
+          
+          # macOS arm64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusflow-darwin-arm64 ./cmd/focusflow
+          tar -czvf dist/focusflow-darwin-arm64.tar.gz -C dist focusflow-darwin-arm64
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd dist
+          sha256sum focusflow-windows-amd64.zip focusflow-linux-amd64.tar.gz focusflow-linux-arm64.tar.gz focusflow-darwin-amd64.tar.gz focusflow-darwin-arm64.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/focusflow-windows-amd64.zip
+            dist/focusflow-linux-amd64.tar.gz
+            dist/focusflow-linux-arm64.tar.gz
+            dist/focusflow-darwin-amd64.tar.gz
+            dist/focusflow-darwin-arm64.tar.gz
+            dist/checksums.txt
+          name: ${{ github.ref_name }} - Deep Work & Distraction Firewall CLI
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -21,8 +22,15 @@ type HostsManager struct {
 	backupPath string
 }
 
+func GetDefaultHostsPath() string {
+	if runtime.GOOS == "windows" {
+		return DefaultHostsPath
+	}
+	return "/etc/hosts"
+}
+
 func NewHostsManager() *HostsManager {
-	return NewHostsManagerWithPath(DefaultHostsPath)
+	return NewHostsManagerWithPath(GetDefaultHostsPath())
 }
 
 func NewHostsManagerWithPath(path string) *HostsManager {

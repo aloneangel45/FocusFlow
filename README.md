@@ -1,6 +1,10 @@
 # ⚡ FocusFlow V2
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/assets/banner.png" alt="FocusFlow V2 Banner" width="700" onerror="this.style.display='none'"/>
+</p>
+
+<p align="center">
   <strong>High-Performance Deep Work Discipline Engine, Atomic Hosts Blocker & Catppuccin Mocha Desktop HUD.</strong><br>
   Engineered for developers, students, and professionals who demand uncompromising focus without digital sabotage.
 </p>

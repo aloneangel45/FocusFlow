@@ -1,3 +1,3 @@
 module github.com/aloneangel45/focusflow
 
-go 1.27.3
+go 1.23

@@ -10,6 +10,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/aloneangel45/FocusFlow/actions/workflows/ci.yml"><img src="https://github.com/aloneangel45/FocusFlow/actions/workflows/ci.yml/badge.svg" alt="CI Status"/></a>
+  <a href="https://github.com/aloneangel45/FocusFlow/releases"><img src="https://img.shields.io/github/v/release/aloneangel45/FocusFlow?style=flat-square" alt="Release"/></a>
   <a href="https://golang.org/"><img src="https://img.shields.io/badge/Engine-Go%20Native-00ADD8.svg?style=flat-square&logo=go" alt="Go Native"/></a>
   <a href="https://python.org/"><img src="https://img.shields.io/badge/GUI-Catppuccin%20Mocha%20High--DPI-cba6f7.svg?style=flat-square" alt="Modern GUI"/></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT"/></a>

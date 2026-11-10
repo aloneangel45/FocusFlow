@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,8 +12,10 @@ permissions:
 
 jobs:
   test-go:
-    name: Go Test (${{ matrix.os }} - Go ${{ matrix.go-version }})
+    name: Go (${{ matrix.os }} - Go ${{ matrix.go-version }})
     runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
     strategy:
       fail-fast: false
       matrix:
@@ -33,24 +35,30 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
-      - name: Run Tests
+      - name: Go Test
         run: go test -v ./...
 
-  test-rust:
-    name: Rust Check & Test
-    runs-on: windows-latest
-    continue-on-error: true
+  test-python:
+    name: Python (${{ matrix.os }} - Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
-      - name: Cargo Check
-        run: cargo check --verbose
-        continue-on-error: true
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
 
-      - name: Cargo Test
-        run: cargo test --verbose
-        continue-on-error: true
+      - name: Run pytest suite
+        run: python -m pytest -v

@@ -8,6 +8,16 @@ const (
 	StrictnessHardcore StrictnessLevel = "hardcore"
 )
 
+var HardcoreAntiCheatBinaries = []string{
+	"taskmgr.exe",
+	"processhacker.exe",
+	"SystemInformer.exe",
+	"procmon.exe",
+	"procmon64.exe",
+	"procexp.exe",
+	"procexp64.exe",
+}
+
 type AntiCheatGuard struct {
 	level      StrictnessLevel
 	supervisor *ProcessSupervisor
@@ -16,12 +26,7 @@ type AntiCheatGuard struct {
 func NewAntiCheatGuard(level StrictnessLevel) *AntiCheatGuard {
 	var blocked []string
 	if level == StrictnessHardcore {
-		blocked = []string{
-			"taskmgr.exe",
-			"processhacker.exe",
-			"procmon.exe",
-			"procexp.exe",
-		}
+		blocked = append(blocked, HardcoreAntiCheatBinaries...)
 	}
 	return &AntiCheatGuard{
 		level:      level,

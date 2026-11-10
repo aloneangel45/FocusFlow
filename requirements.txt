@@ -1,0 +1,11 @@
+# FocusFlow v2.1.0 — Python Runtime Dependencies
+#
+# Required runtime dependencies: NONE (0 external packages required).
+# On Windows 10/11, FocusFlowGUI and focusflow_core operate natively on the Python
+# standard library (tkinter, ctypes Win32 Toolhelp32 / ReplaceFileW / ShellExecuteW,
+# hashlib, json, csv, threading).
+#
+# Optional extras (uncomment or install via `pip install .[reports,dev]`):
+# Pillow>=10.0.0   # Optional: export visual PNG analytics cards from the desktop HUD
+# psutil>=5.9.0    # Optional: cross-platform process enumeration fallback
+# pytest>=8.0.0    # Development: run the automated Python test suite (`python -m pytest -v`)

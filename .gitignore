@@ -207,7 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 # Executables and builds
+focusflow
 focusflow.exe
+.focusflow/
 target/
 *.tmp
 *.bak

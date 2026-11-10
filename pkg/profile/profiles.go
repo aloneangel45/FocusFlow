@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/aloneangel45/focusflow/pkg/engine"
+	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
 type FocusProfile struct {
@@ -22,40 +25,79 @@ type ConfigStore struct {
 	Profiles        map[string]*FocusProfile `json:"profiles"`
 }
 
+type rawConfigCompat struct {
+	CustomDomains   []string                 `json:"custom_domains"`
+	CustomProcesses []string                 `json:"custom_processes"`
+	CustomSites     []string                 `json:"custom_sites"`
+	CustomApps      []string                 `json:"custom_apps"`
+	Profiles        map[string]*FocusProfile `json:"profiles"`
+}
+
 func GetConfigDir() string {
-	appData := os.Getenv("APPDATA")
-	if appData != "" {
-		return filepath.Join(appData, "FocusFlow")
-	}
-	return ".focusflow"
+	return storage.GetStateDir()
 }
 
 func GetConfigPath() string {
 	return filepath.Join(GetConfigDir(), "config.json")
 }
 
+func DefaultProfiles() map[string]*FocusProfile {
+	return map[string]*FocusProfile{
+		"dev":      DevProfile(),
+		"study":    StudyProfile(),
+		"hardcore": HardcoreProfile(),
+	}
+}
+
+func sanitizeProcessList(procs []string) []string {
+	seen := make(map[string]struct{}, len(procs))
+	out := make([]string, 0, len(procs))
+	for _, raw := range procs {
+		norm, err := engine.NormalizeProcessName(raw)
+		if err != nil {
+			continue
+		}
+		if _, exists := seen[norm]; !exists {
+			seen[norm] = struct{}{}
+			out = append(out, norm)
+		}
+	}
+	return out
+}
+
 func LoadConfig() (*ConfigStore, error) {
 	path := GetConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// Return default config
-		cfg := &ConfigStore{
-			CustomDomains:   []string{},
-			CustomProcesses: []string{},
-			Profiles: map[string]*FocusProfile{
-				"dev":      DevProfile(),
-				"study":    StudyProfile(),
-				"hardcore": HardcoreProfile(),
-			},
+		if os.IsNotExist(err) {
+			cfg := &ConfigStore{
+				CustomDomains:   []string{},
+				CustomProcesses: []string{},
+				Profiles:        DefaultProfiles(),
+			}
+			_ = SaveConfig(cfg)
+			return cfg, nil
 		}
-		_ = SaveConfig(cfg)
-		return cfg, nil
-	}
-
-	var cfg ConfigStore
-	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+
+	var compat rawConfigCompat
+	if err := json.Unmarshal(data, &compat); err != nil {
+		return nil, err
+	}
+
+	mergedDomains := append([]string{}, compat.CustomDomains...)
+	mergedDomains = append(mergedDomains, compat.CustomSites...)
+
+	mergedProcs := append([]string{}, compat.CustomProcesses...)
+	mergedProcs = append(mergedProcs, compat.CustomApps...)
+
+	cfg := &ConfigStore{
+		CustomDomains:   engine.SanitizeDomains(mergedDomains),
+		CustomProcesses: sanitizeProcessList(mergedProcs),
+		Profiles:        compat.Profiles,
+	}
+
 	if cfg.Profiles == nil {
 		cfg.Profiles = make(map[string]*FocusProfile)
 	}
@@ -68,18 +110,72 @@ func LoadConfig() (*ConfigStore, error) {
 	if _, ok := cfg.Profiles["hardcore"]; !ok {
 		cfg.Profiles["hardcore"] = HardcoreProfile()
 	}
-	return &cfg, nil
+
+	for key, p := range cfg.Profiles {
+		if p == nil {
+			continue
+		}
+		if p.Name == "" {
+			p.Name = key
+		}
+		p.BlockedDomains = engine.SanitizeDomains(p.BlockedDomains)
+		p.BlockedProcesses = sanitizeProcessList(p.BlockedProcesses)
+	}
+
+	return cfg, nil
 }
 
 func SaveConfig(cfg *ConfigStore) error {
 	dir := GetConfigDir()
-	_ = os.MkdirAll(dir, 0755)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	if cfg.CustomDomains == nil {
+		cfg.CustomDomains = []string{}
+	} else {
+		cfg.CustomDomains = engine.SanitizeDomains(cfg.CustomDomains)
+	}
+	if cfg.CustomProcesses == nil {
+		cfg.CustomProcesses = []string{}
+	} else {
+		cfg.CustomProcesses = sanitizeProcessList(cfg.CustomProcesses)
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = DefaultProfiles()
+	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(GetConfigPath(), data, 0644)
+	data = append(data, '\n')
+
+	cfgPath := GetConfigPath()
+	tmpFile, err := os.CreateTemp(dir, "config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = tmpFile.Sync()
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Chmod(tmpPath, 0644)
+	if err := os.Rename(tmpPath, cfgPath); err != nil {
+		if wErr := os.WriteFile(cfgPath, data, 0644); wErr != nil {
+			_ = os.Remove(tmpPath)
+			return err
+		}
+		_ = os.Remove(tmpPath)
+	}
+	return nil
 }
 
 func DevProfile() *FocusProfile {
@@ -111,7 +207,7 @@ func DevProfile() *FocusProfile {
 func StudyProfile() *FocusProfile {
 	return &FocusProfile{
 		Name:        "study",
-		Description: "Academic & Exam Preparation Mode (YKS/KPSS/LGS - Zero entertainment)",
+		Description: "Academic & Exam Preparation Mode (Zero entertainment)",
 		BlockedDomains: []string{
 			"youtube.com",
 			"instagram.com",
@@ -147,24 +243,41 @@ func HardcoreProfile() *FocusProfile {
 }
 
 func LoadOrDefault(name string) *FocusProfile {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "coding" {
+		lower = "dev"
+	} else if lower == "lockdown" {
+		lower = "hardcore"
+	}
+
 	cfg, err := LoadConfig()
 	if err == nil {
-		lower := strings.ToLower(strings.TrimSpace(name))
-		if p, ok := cfg.Profiles[lower]; ok {
-			// Merge global custom domains & processes
+		if p, ok := cfg.Profiles[lower]; ok && p != nil {
 			pCopy := *p
-			pCopy.BlockedDomains = append(pCopy.BlockedDomains, cfg.CustomDomains...)
-			pCopy.BlockedProcesses = append(pCopy.BlockedProcesses, cfg.CustomProcesses...)
+			domains := append([]string{}, p.BlockedDomains...)
+			domains = append(domains, cfg.CustomDomains...)
+			pCopy.BlockedDomains = engine.SanitizeDomains(domains)
+
+			procs := append([]string{}, p.BlockedProcesses...)
+			procs = append(procs, cfg.CustomProcesses...)
+			pCopy.BlockedProcesses = sanitizeProcessList(procs)
 			return &pCopy
 		}
 	}
 
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "dev", "coding":
-		return DevProfile()
-	case "hardcore", "lockdown":
-		return HardcoreProfile()
+	var fallback *FocusProfile
+	switch lower {
+	case "dev":
+		fallback = DevProfile()
+	case "hardcore":
+		fallback = HardcoreProfile()
 	default:
-		return StudyProfile()
+		fallback = StudyProfile()
 	}
+
+	if err == nil {
+		fallback.BlockedDomains = engine.SanitizeDomains(append(fallback.BlockedDomains, cfg.CustomDomains...))
+		fallback.BlockedProcesses = sanitizeProcessList(append(fallback.BlockedProcesses, cfg.CustomProcesses...))
+	}
+	return fallback
 }

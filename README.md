@@ -1,130 +1,164 @@
-# FocusFlow V2
+# FocusFlow v2.1
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/assets/banner.png" alt="FocusFlow V2 Banner" width="700" onerror="this.style.display='none'"/>
+  <img src="https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/assets/banner.png" alt="FocusFlow Banner" width="700" onerror="this.style.display='none'"/>
 </p>
 
 <p align="center">
-  <strong>High-Performance Deep Work Discipline Engine, Atomic Hosts Blocker & Catppuccin Mocha Desktop HUD.</strong><br>
-  Engineered for developers, students, and professionals who demand uncompromising focus without digital sabotage.
+  <strong>Crash-Safe Deep Work Discipline Engine, Dual-Stack Atomic Hosts Blocker &amp; Catppuccin Mocha Desktop HUD.</strong><br>
+  Engineered in Go and Python (zero external runtime dependencies) for developers, students, and operators who demand uncompromising focus without network corruption.
 </p>
 
 <p align="center">
   <a href="https://github.com/aloneangel45/FocusFlow/actions/workflows/ci.yml"><img src="https://github.com/aloneangel45/FocusFlow/actions/workflows/ci.yml/badge.svg" alt="CI Status"/></a>
   <a href="https://github.com/aloneangel45/FocusFlow/releases"><img src="https://img.shields.io/github/v/release/aloneangel45/FocusFlow?style=flat-square" alt="Release"/></a>
-  <a href="https://golang.org/"><img src="https://img.shields.io/badge/Engine-Go%20Native-00ADD8.svg?style=flat-square&logo=go" alt="Go Native"/></a>
-  <a href="https://python.org/"><img src="https://img.shields.io/badge/GUI-Catppuccin%20Mocha%20High--DPI-cba6f7.svg?style=flat-square" alt="Modern GUI"/></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/CLI-Go%201.23%2B-00ADD8.svg?style=flat-square&logo=go" alt="Go Native CLI"/></a>
+  <a href="https://python.org/"><img src="https://img.shields.io/badge/HUD-Python%203.10%2B%20Zero--Dep-cba6f7.svg?style=flat-square" alt="Catppuccin Mocha HUD"/></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License: MIT"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Platform-Windows%20Win32-0078D6?style=flat-square&logo=windows" alt="Platform"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Memory%20Footprint-%3C4MB-brightgreen?style=flat-square" alt="Memory Footprint"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Rollback-SHA--256%20Atomic-purple?style=flat-square" alt="Atomic Rollback"/></a>
-  <a href="#"><img src="https://img.shields.io/badge/Anti--DoH-Auto--Flushed-success?style=flat-square" alt="Anti-DoH"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Rollback-SHA--256%20Write--Ahead%20Journal-purple?style=flat-square" alt="Write-Ahead Journal"/></a>
+  <a href="#"><img src="https://img.shields.io/badge/Sinkhole-IPv4%20%2B%20IPv6%20%2B%20Anti--DoH-success?style=flat-square" alt="Dual-Stack Anti-DoH"/></a>
 </p>
 
 ---
 
-## Why FocusFlow V2? (The Paradigm Shift)
+## Why FocusFlow v2.1?
 
-Traditional site blockers and browser extensions are easily bypassed:
-1. **Easy Browser Disabling:** Extensions can be disabled in two clicks via incognito mode or developer settings.
-2. **DNS-over-HTTPS (DoH) Leaks:** Modern browsers (Chrome, Brave, Edge) bypass local `hosts` files by resolving DNS through encrypted cloud resolvers (`cloudflare-dns.com`, `dns.google`).
-3. **Hosts File Corruption:** Primitive scripts write directly to `C:\Windows\System32\drivers\etc\hosts`. If the system crashes, reboots, or loses power, internet connectivity is permanently broken.
-4. **Resource Hogging:** Electron/Python blockers often consume 200MB+ RAM and 5-10% CPU constantly iterating process trees.
+Conventional website blockers and browser extensions fail under real-world conditions:
+1. **Trivial Extension Bypass:** Browser extensions can be disabled in seconds or bypassed via private windows and secondary browsers.
+2. **IPv6 &amp; DNS-over-HTTPS (DoH) Leaks:** Single-stack `127.0.0.1` blockers leak traffic over IPv6 (`AAAA`) records and encrypted browser DoH resolvers (`cloudflare-dns.com`, `dns.google`, `dns.quad9.net`, `dns.nextdns.io`).
+3. **Hosts File &amp; ACL Corruption:** Naive scripts overwrite `C:\Windows\System32\drivers\etc\hosts` in place without write-ahead journaling or Windows DACL preservation—breaking DNS resolution after power loss, crashes, or reboots.
+4. **Heavy Runtime Dependencies:** Typical desktop wrappers pull hundreds of megabytes of packages just to enumerate processes.
 
-**FocusFlow V2 solves all of this at the native operating system layer:**
-* **SHA-256 Atomic Rollback:** Backs up the hosts file before every sprint. Atomic file swapping guarantees your original network configuration is restored 100% cleanly, even during unexpected shutdowns.
-* **Zero-Overhead Win32 Scanning:** Replaces high-overhead pollers with low-level Win32 `CreateToolhelp32Snapshot` calls, consuming **<4 MB RAM** and **0.0% idle CPU**.
-* 🎨 **Catppuccin Mocha High-DPI Desktop GUI:** A sleek, modern dark HUD with real-time Pomodoro timers, weekly bar charts, custom blocklists, and motivation cards.
-* **Automatic Anti-DoH & DNS Flushing:** Automatically flushes the local resolver cache (`ipconfig /flushdns`) and restricts known DoH bypass endpoints during focus sessions.
-* **Persistent Analytics:** Tracks completed sprints, streak days, total deep work hours, and distraction blocks locally.
+**FocusFlow v2.1 solves these failure modes at the operating-system boundary:**
+* **Unified Go CLI + Zero-Dependency Python HUD:** `cmd/focusflow` (Go) and `FocusFlowGUI.py` + `focusflow_core/` (Python stdlib + Win32 `ctypes`) share the exact same state directory, `config.json`, `sessions.json`, `hosts.focusflow.journal.json`, and managed block markers.
+* **Write-Ahead SHA-256 Rollback Journal &amp; Auto-Recovery:** Strips any prior managed blocks before computing a clean baseline SHA-256 backup, persists `hosts.focusflow.journal.json` before touching `hosts`, preserves Windows DACLs via `ReplaceFileW` (`NetworkService` / `Users` read permissions remain intact), and automatically recovers orphaned crash/reboot states on startup (`RecoverIfOrphaned`).
+* **Dual-Stack IPv4 + IPv6 Sinkhole &amp; Expanded Anti-DoH:** Blocks both `0.0.0.0` and `::` (including `www.` subdomains) alongside major DoH bypass endpoints, with mid-session tamper verification and non-blocking DNS cache flushing.
+* **Hardened Native Process Supervisor:** Uses Win32 `CreateToolhelp32Snapshot` (`Process32FirstW`/`Process32NextW`) on Windows (zero `psutil` required) and direct `/proc` inspection on Linux (resolving 15-byte `TASK_COMM_LEN` truncation without spawning `ps` every second), guarded by a strict critical system/host process denylist.
+* **High-Friction Strict Mode &amp; Genuine Telemetry:** Features a non-pasteable 16-character alphanumeric Friction Challenge, `time.monotonic()` zero-drift countdowns, Per-Monitor v2 High-DPI Catppuccin Mocha HUD, and real streak/completion analytics exported to JSON, CSV, or PNG.
 
 ---
 
 ## Architecture
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│           FocusFlow V2 Desktop GUI / CLI Terminal            │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-        ┌──────────────────────┼───────────────────────┐
-        ▼                      ▼                       ▼
- ┌──────────────┐       ┌──────────────┐       ┌─────────────────┐
- │ Hosts Engine │       │ Win32 Killer │       │ Session Metrics │
- │ (Atomic/SHA) │       │ (<4MB RAM)   │       │ (%APPDATA% JSON)│
- └──────┬───────┘       └──────┬───────┘       └─────────────────┘
-        │                      │
-        ▼                      ▼
- [System Hosts File]     [Target Procs]
- (Auto-Rollback)         (Terminated)
++----------------------------------------------------------------------+
+|       FocusFlow v2.1 CLI (Go)    <==>    Desktop HUD (Python/Tk)     |
++-----------------------------------+----------------------------------+
+                                    |
+          Shared State (%APPDATA%\FocusFlow or $FOCUSFLOW_HOME)
+     [config.json | sessions.json | hosts.focusflow.journal.json]
+                                    |
+        +---------------------------+---------------------------+
+        |                           |                           |
+        v                           v                           v
++------------------+      +-------------------+      +--------------------+
+| Dual-Stack Hosts |      | Native Supervisor |      | Real-Time Metrics  |
+| SHA-256 + Journal|      | Win32 / Linux proc|      | Streak, JSON & CSV |
++--------+---------+      +---------+---------+      +--------------------+
+         |                          |
+         v                          v
+ [System hosts File]       [Blocked Processes]
+ (ACL-Safe Swap)           (Denylist-Guarded)
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Graphical Interface (GUI)
-Simply launch `Launch_FocusFlow_GUI.bat` or run:
+### 1. Desktop HUD (Python 3.10+, Zero Required Packages)
+Launch `Launch_FocusFlow_GUI.bat` on Windows or run directly:
 ```bash
-pythonw FocusFlowGUI.py
+python FocusFlowGUI.py
 ```
-
-### 2. Standalone Native Binary (CLI)
-Compile directly from source with Go:
+To launch directly with Administrator elevation prompt on Windows:
 ```bash
-go build -ldflags="-s -w" -o focusflow.exe ./cmd/focusflow
+python FocusFlowGUI.py --elevate
+```
+*(Optional)* For PNG chart card rendering, install `Pillow`: `pip install .[reports]`.
+
+### 2. Native Standalone CLI (Go 1.23+)
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.1.0" -o focusflow ./cmd/focusflow
 ```
 
 ---
 
-## CLI Usage
+## CLI Reference
 
-> **Note:** Modifying system hosts files requires administrative privileges. Run terminal as **Administrator**.
+> **Privilege Model:** Modifying the system `hosts` file requires Administrator (`Windows`) or `root` (`Linux`/`macOS`) privileges. When run unprivileged, FocusFlow honestly reports `PROCESS-ONLY [UNPRIVILEGED]` rather than claiming `hosts` is locked. Pass `--elevate` to request privilege elevation.
 
 ```bash
-# Launch interactive terminal TUI menu
+# Launch interactive terminal dashboard
 focusflow menu
 
-# Start a 50-minute Developer sprint (keeps GitHub & Docs open)
-focusflow start --profile dev --minutes 50
+# Start a 50-minute Developer sprint (elevating via UAC/sudo if needed)
+focusflow start --profile dev --minutes 50 --elevate
 
-# Start a 25-minute Academic Study sprint (YKS/KPSS/Exam mode)
+# Start a 25-minute Study sprint or Hardcore Aegis sprint
 focusflow start --profile study --minutes 25
+focusflow start --profile hardcore --strict hardcore
 
-# Check current blocker status
+# Inspect shield capability, hosts status, and active journal (human or JSON)
 focusflow status
+focusflow status --json
 
-# Immediate rollback & restore internet
+# Manage custom RFC-1123 domains and denylist-checked executables
+focusflow list --json
+focusflow add site reddit.com
+focusflow add app steam.exe
+focusflow remove site reddit.com
+
+# View genuine focus hours, completion rate, active streak, and 7-day ASCII chart
+focusflow stats --days 7
+focusflow stats --days 7 --json
+
+# Export telemetry to JSON or CSV
+focusflow export --format json --out focus_report.json
+focusflow export --format csv --out focus_sessions.csv
+
+# Run system diagnostics or recover orphaned crash/reboot state
+focusflow doctor
+focusflow doctor --json
+focusflow recover --elevate
+
+# Immediate rollback & DNS cache flush
 focusflow stop
-
-# Purge local DNS cache immediately
 focusflow flush
-
-# View lifetime productivity metrics
-focusflow stats
 ```
 
 ---
 
 ## Built-in Profiles
 
-| Profile | Target Audience | Allowed Resources | Blocked Distractions |
+| Profile | Default Interval | Target Workflow | Active Protections |
 | :--- | :--- | :--- | :--- |
-| **`dev`** | Software Engineers | GitHub, GitLab, StackOverflow, Docs.rs, MDN | Twitter/X, Instagram, TikTok, Reddit, Netflix, Twitch, Discord, Steam |
-| **`study`** | Students & Researchers | Educational portals, LMS, Academic sites | YouTube, TikTok, Kick, Netflix, Gaming launchers, Chat clients |
-| **`hardcore`** | Deep Work Purists | Specified whitelist only | All distractions + Task Manager / Terminal kill prevention |
+| **`study`** | `25m / 5m` | Academic &amp; Exam Prep | Blocks video, social, streaming, chat clients, and game launchers |
+| **`dev`** | `50m / 10m` | Software Engineering | Keeps GitHub, StackOverflow &amp; technical docs open; blocks social &amp; gaming |
+| **`hardcore`** | `25m / 5m` | Aegis Lockdown | Study blocklist + strict Friction Challenge + Anti-Cheat task-manager suppression (`taskmgr.exe`, `SystemInformer.exe`, `processhacker.exe`) |
 
 ---
 
-## Safety & Integrity Guarantee
+## Crash Safety &amp; System Integrity
 
-FocusFlow V2 is engineered with an atomic safety-first philosophy:
-* Before any modification, the original `hosts` file is copied to `hosts.focusflow.bak` and verified via a SHA-256 checksum.
-* On session completion, interrupt (`Ctrl+C`), or `focusflow stop`, the backup file is restored and the DNS resolver cache is cleared immediately.
+* **Clean Baseline Guarantee:** FocusFlow strips any current or legacy managed blocks before hashing and writing `hosts.focusflow.bak`, ensuring a contaminated `hosts` file is never backed up.
+* **Write-Ahead Rollback Journal:** `hosts.focusflow.journal.json` records `original_sha256`, `backup_path`, `hosts_path`, `session_id`, `pid`, `started_at`, `expected_end_at`, and `profile` prior to any `hosts` write.
+* **Automatic Startup Recovery:** On every CLI or GUI startup, `RecoverIfOrphaned` checks whether a prior session crashed, rebooted, or expired; verifies `.bak` against `original_sha256` (falling back to deterministic marker stripping if `.bak` was altered); restores `hosts` while preserving OS permissions/ACLs; and marks the interrupted session `completed: false` in `sessions.json`.
+* **Critical Process Denylist:** Kernel, session, shell, and host binaries (`csrss.exe`, `lsass.exe`, `svchost.exe`, `explorer.exe`, `dwm.exe`, `winlogon.exe`, `python.exe`, `pythonw.exe`, `focusflow.exe`, `wt.exe`, PIDs `0`/`4`/self/parent) can never be added or terminated.
+
+---
+
+## Testing
+
+All Go and Python tests run hermetically inside temporary `FOCUSFLOW_HOME` and `FOCUSFLOW_HOSTS_PATH` sandboxes—never touching your real `%APPDATA%` or system `hosts` file:
+
+```bash
+go vet ./...
+go test -v ./...
+python -m pytest -v
+```
 
 ---
 
 ## License
 
-This project is open-source under the [MIT License](LICENSE).  
-Created with passion by [aloneangel45](https://github.com/aloneangel45).
+Released under the [MIT License](LICENSE) by [aloneangel45](https://github.com/aloneangel45).

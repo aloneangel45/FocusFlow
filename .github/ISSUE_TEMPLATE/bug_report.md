@@ -1,23 +1,24 @@
 ---
-name: Hata Bildirimi (Bug Report)
-about: FocusFlow'da karşılaştığınız bir hatayı bildirin
+name: Bug Report
+about: Report a defect in FocusFlow CLI or Desktop HUD
 title: '[BUG] '
 labels: bug
 assignees: ''
 ---
 
-**Hatanın Tanımı**
-Hatanın ne olduğunu açık ve net bir şekilde açıklayın.
+**Description**
+A concise description of the issue encountered.
 
-**Tekrarlama Adımları**
-1. Şu ekranı açın '...'
-2. Şuraya tıklayın '...'
-3. Hatayı görün
+**Steps to Reproduce**
+1. Run command or open HUD tab '...'
+2. Perform action '...'
+3. Observe error '...'
 
-**Beklenen Davranış**
-Ne olması gerektiğini açıklayın.
+**Expected Behavior**
+Describe what should have happened instead.
 
-**Sistem Bilgileri:**
- - İşletim Sistemi: [Windows 10 / 11]
- - Python Sürümü: [3.10+]
- - FocusFlow Sürümü: [1.0.0]
+**Environment**
+ - OS: [Windows 11 / Ubuntu 24.04 / macOS]
+ - Go Version: [1.23+]
+ - Python Version: [3.10+]
+ - FocusFlow Version: [2.1.0]

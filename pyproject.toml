@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "focusflow"
+version = "2.1.0"
+description = "Crash-safe deep work discipline engine, dual-stack atomic hosts blocker, Win32 process supervisor, and Catppuccin Mocha desktop HUD."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "aloneangel45" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+reports = ["Pillow>=10.0.0"]
+proc = ["psutil>=5.9.0"]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+focusflow-gui = "FocusFlowGUI:main"
+
+[tool.setuptools.packages.find]
+include = ["focusflow_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

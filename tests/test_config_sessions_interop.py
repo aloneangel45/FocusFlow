@@ -136,8 +136,8 @@ def test_go_and_python_full_state_interoperability(hermetic_focusflow_env: tuple
 
     store = SessionStore(state_dir=str(state_dir))
     now = datetime.datetime.now(datetime.timezone.utc)
-    store.start_session("interop-1", "dev", 50, start_time=now - datetime.timedelta(minutes=50))
     today_start = datetime.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    store.start_session("interop-1", "dev", 50, start_time=today_start)
     store.finalize_session(
         "interop-1",
         "dev",

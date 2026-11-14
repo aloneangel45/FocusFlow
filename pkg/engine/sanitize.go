@@ -32,6 +32,18 @@ var reservedExactDomains = map[string]struct{}{
 	"ip6-allnodes":          {},
 	"ip6-allrouters":        {},
 	"ip6-allhosts":          {},
+	"home.arpa":             {},
+}
+
+func isReservedDomain(host string) bool {
+	if _, reserved := reservedExactDomains[host]; reserved {
+		return true
+	}
+	return strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".localdomain") ||
+		strings.HasSuffix(host, ".home.arpa") ||
+		strings.HasSuffix(host, ".invalid")
 }
 
 var protectedBaseNames = []string{
@@ -147,7 +159,7 @@ func SanitizeDomain(raw string) (string, error) {
 		s = strings.TrimPrefix(s, "https://")
 	} else if strings.HasPrefix(s, "http://") {
 		s = strings.TrimPrefix(s, "http://")
-	} else if strings.Contains(s, "://") {
+	} else if strings.Contains(s, "://") || strings.HasPrefix(s, "//") {
 		return "", ErrInvalidRFC1123
 	}
 
@@ -177,6 +189,11 @@ func SanitizeDomain(raw string) (string, error) {
 		if portPart == "" {
 			return "", ErrInvalidRFC1123
 		}
+		for i := 0; i < len(portPart); i++ {
+			if portPart[i] < '0' || portPart[i] > '9' {
+				return "", ErrInvalidRFC1123
+			}
+		}
 		portNum, err := strconv.Atoi(portPart)
 		if err != nil || portNum < 1 || portNum > 65535 {
 			return "", ErrInvalidRFC1123
@@ -184,35 +201,37 @@ func SanitizeDomain(raw string) (string, error) {
 		s = hostPart
 	}
 
-	// Strip single trailing FQDN dot if present
+	// Reject multiple trailing dots before stripping single FQDN trailing dot
+	if strings.HasSuffix(s, "..") {
+		return "", ErrInvalidRFC1123
+	}
 	s = strings.TrimSuffix(s, ".")
 	if s == "" {
 		return "", ErrEmptyDomain
 	}
 
-	// Reject IPv4/IPv6 literals before and after stripping www.
+	// Reject IPv4/IPv6 literals and reserved domains before and after stripping www.
 	if net.ParseIP(s) != nil {
 		return "", ErrIPLiteral
 	}
-
-	if _, reserved := reservedExactDomains[s]; reserved {
-		return "", ErrReservedDomain
-	}
-	if strings.HasSuffix(s, ".local") || strings.HasSuffix(s, ".localhost") || strings.HasSuffix(s, ".localdomain") {
+	if isReservedDomain(s) {
 		return "", ErrReservedDomain
 	}
 
 	if strings.HasPrefix(s, "www.") {
 		rest := strings.TrimPrefix(s, "www.")
+		if net.ParseIP(rest) != nil {
+			return "", ErrIPLiteral
+		}
+		if isReservedDomain(rest) {
+			return "", ErrReservedDomain
+		}
 		if strings.Contains(rest, ".") {
 			s = rest
 		}
 	}
 
-	if _, reserved := reservedExactDomains[s]; reserved {
-		return "", ErrReservedDomain
-	}
-	if strings.HasSuffix(s, ".local") || strings.HasSuffix(s, ".localhost") || strings.HasSuffix(s, ".localdomain") {
+	if isReservedDomain(s) {
 		return "", ErrReservedDomain
 	}
 	if net.ParseIP(s) != nil {
@@ -245,17 +264,14 @@ func SanitizeDomain(raw string) (string, error) {
 		}
 	}
 
-	// RFC-1123 / DNS rule: top-level label cannot be all digits (also rejects malformed numeric IPs like 999.999.999.999)
+	// RFC-1123 / IANA DNS rule: top-level label cannot start with a digit or be all digits
+	// (rejects malformed numeric IPs like 999.999.999.999 as well as hex/octal IPs like 0x7f.0.0.0x1).
 	tld := labels[len(labels)-1]
-	allDigits := true
-	for i := 0; i < len(tld); i++ {
-		if tld[i] < '0' || tld[i] > '9' {
-			allDigits = false
-			break
-		}
-	}
-	if allDigits {
+	if tld[0] >= '0' && tld[0] <= '9' {
 		return "", ErrIPLiteral
+	}
+	if len(tld) < 2 {
+		return "", ErrInvalidRFC1123
 	}
 
 	return s, nil

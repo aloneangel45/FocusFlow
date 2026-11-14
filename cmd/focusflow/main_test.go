@@ -278,3 +278,191 @@ func TestCLI_MultiCyclePomodoroAndInterruptRollback(t *testing.T) {
 		t.Errorf("expected hosts markers cleaned up after SIGINT during hardcore break:\n%s", string(rawHosts))
 	}
 }
+
+func TestCLI_SubcommandFlagOrderingAndPositionalValidation(t *testing.T) {
+	setupHermeticCLIEnv(t)
+
+	// 1. profile create with flags before, between, and after positional <name>
+	code, out, errOut := execCLI("profile", "create", "myprof", "--minutes", "35", "--break", "7", "--json")
+	if code != 0 {
+		t.Fatalf("profile create myprof --minutes 35 failed: %s", errOut)
+	}
+	var cResp struct {
+		Created bool            `json:"created"`
+		Profile profileJSONItem `json:"profile"`
+	}
+	if err := json.Unmarshal([]byte(out), &cResp); err != nil {
+		t.Fatalf("unmarshal create JSON: %v", err)
+	}
+	if cResp.Profile.Name != "myprof" || cResp.Profile.DefaultWorkMinutes != 35 || cResp.Profile.DefaultBreakMinutes != 7 {
+		t.Fatalf("unexpected profile create result: %+v", cResp.Profile)
+	}
+
+	// 2. profile show <name> --json and profile show --json <name>
+	for _, args := range [][]string{
+		{"profile", "show", "myprof", "--json"},
+		{"profile", "show", "--json", "myprof"},
+	} {
+		c, o, e := execCLI(args...)
+		if c != 0 {
+			t.Fatalf("%v failed: %s", args, e)
+		}
+		var item profileJSONItem
+		if err := json.Unmarshal([]byte(o), &item); err != nil || item.Name != "myprof" {
+			t.Fatalf("%v returned unexpected JSON: %s (err=%v)", args, o, err)
+		}
+	}
+
+	// 3. Unknown flag on profile create must fail rather than swallowing positional <name>
+	if c, _, _ := execCLI("profile", "create", "--unknown-opt", "swallowed"); c == 0 {
+		t.Errorf("expected unknown flag on profile create to fail")
+	}
+
+	// 4. add / remove with --json and path basename normalization
+	cAddSite, addSiteOut, addSiteErr := execCLI("add", "site", "https://www.Reddit.com:443/r/golang", "--json")
+	if cAddSite != 0 {
+		t.Fatalf("add site --json failed: %s", addSiteErr)
+	}
+	var addSiteResp map[string]any
+	if err := json.Unmarshal([]byte(addSiteOut), &addSiteResp); err != nil || addSiteResp["added"] != true || addSiteResp["value"] != "reddit.com" {
+		t.Fatalf("unexpected add site JSON: %+v (err=%v)", addSiteResp, err)
+	}
+
+	cRemSite, remSiteOut, remSiteErr := execCLI("remove", "--json", "site", "https://reddit.com:443/test")
+	if cRemSite != 0 {
+		t.Fatalf("remove --json site failed: %s", remSiteErr)
+	}
+	var remSiteResp map[string]any
+	if err := json.Unmarshal([]byte(remSiteOut), &remSiteResp); err != nil || remSiteResp["removed"] != true || remSiteResp["value"] != "reddit.com" {
+		t.Fatalf("unexpected remove site JSON: %+v (err=%v)", remSiteResp, err)
+	}
+
+	cAddApp, addAppOut, addAppErr := execCLI("add", "app", "Steam", "--json")
+	if cAddApp != 0 {
+		t.Fatalf("add app --json failed: %s", addAppErr)
+	}
+	var addAppResp map[string]any
+	if err := json.Unmarshal([]byte(addAppOut), &addAppResp); err != nil || addAppResp["added"] != true || addAppResp["value"] != "steam.exe" {
+		t.Fatalf("unexpected add app JSON: %+v (err=%v)", addAppResp, err)
+	}
+	cRemApp, remAppOut, remAppErr := execCLI("remove", "app", "/opt/games/Steam.exe", "--json")
+	if cRemApp != 0 {
+		t.Fatalf("remove app --json failed: %s", remAppErr)
+	}
+	var remAppResp map[string]any
+	if err := json.Unmarshal([]byte(remAppOut), &remAppResp); err != nil || remAppResp["removed"] != true || remAppResp["value"] != "steam.exe" {
+		t.Fatalf("unexpected remove app JSON: %+v (err=%v)", remAppResp, err)
+	}
+
+	// 5. goal <positional> must fail fast rather than silently ignoring the argument
+	if c, _, _ := execCLI("goal", "90"); c == 0 {
+		t.Errorf("expected 'focusflow goal 90' without --minutes to return non-zero error")
+	}
+
+	// 6. start <profile> --minutes <n> (positional profile before flags)
+	var outBuf, errBuf bytes.Buffer
+	sigChan := make(chan os.Signal, 1)
+	startCode := runStartWithSignals([]string{"dev", "--minutes", "33", "--seconds", "1"}, &outBuf, &errBuf, sigChan)
+	if startCode != 0 {
+		t.Fatalf("start dev --minutes 33 failed: %s", errBuf.String())
+	}
+	store, _ := storage.NewStore()
+	sessions, _ := store.LoadSessions()
+	if len(sessions) != 1 || sessions[0].Profile != "dev" || sessions[0].DurationMinutes != 33 || !sessions[0].Completed {
+		t.Fatalf("expected completed 33m dev session, got %+v", sessions)
+	}
+
+	// 7. profile delete <name> --json
+	if c, _, e := execCLI("profile", "delete", "myprof", "--json"); c != 0 {
+		t.Fatalf("profile delete myprof --json failed: %s", e)
+	}
+}
+
+func TestCLI_StopAbortsRunningSessionAndConcurrentStartExitsCleanly(t *testing.T) {
+	_, hostsPath := setupHermeticCLIEnv(t)
+
+	store, err := storage.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Part A: Unprivileged running session (no hosts journal) is finalized as aborted on `focusflow stop`
+	t0 := time.Now().UTC().Add(-8 * time.Minute)
+	if err := store.StartSession("ghost-unpriv-1", "study", 25, t0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	code, stopOut, stopErr := execCLI("stop", "--json")
+	if code != 0 {
+		t.Fatalf("stop --json failed: %s", stopErr)
+	}
+	var sResp stopJSONOutput
+	if err := json.Unmarshal([]byte(stopOut), &sResp); err != nil {
+		t.Fatalf("unmarshal stop JSON: %v", err)
+	}
+	if !sResp.Stopped || sResp.AbortedSessions != 1 {
+		t.Fatalf("expected Stopped=true AbortedSessions=1, got %+v", sResp)
+	}
+	afterStop, _ := store.LoadSessions()
+	if len(afterStop) != 1 || afterStop[0].Status != "aborted" || afterStop[0].Completed {
+		t.Fatalf("expected ghost-unpriv-1 aborted, got %+v", afterStop)
+	}
+
+	// Part B: Concurrent `focusflow start` + external `focusflow stop` must NOT re-apply hosts or double-count
+	var startOut, startErr bytes.Buffer
+	sigChan := make(chan os.Signal, 1)
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runStartWithSignals(
+			[]string{"--profile", "study", "--minutes", "25", "--seconds", "8", "--strict", "hardcore"},
+			&startOut,
+			&startErr,
+			sigChan,
+		)
+	}()
+
+	// Wait until the new running session appears in sessions.json
+	deadline := time.Now().Add(3 * time.Second)
+	sawRunning := false
+	for time.Now().Before(deadline) {
+		cur, _ := store.LoadSessions()
+		if len(cur) == 2 && cur[1].Status == "running" {
+			sawRunning = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !sawRunning {
+		t.Fatalf("timed out waiting for concurrent start session to enter running state")
+	}
+
+	// Invoke external `focusflow stop`
+	if c, _, e := execCLI("stop"); c != 0 {
+		t.Fatalf("external stop failed: %s", e)
+	}
+
+	select {
+	case exitCode := <-doneCh:
+		if exitCode != 0 {
+			t.Fatalf("expected concurrent start to exit cleanly with 0 after external stop, got %d (stderr=%s)", exitCode, startErr.String())
+		}
+	case <-time.After(4 * time.Second):
+		sigChan <- os.Interrupt
+		t.Fatalf("concurrent start loop did not exit promptly after external stop")
+	}
+
+	rawHosts, _ := os.ReadFile(hostsPath)
+	if engine.HasManagedMarkers(string(rawHosts)) {
+		t.Fatalf("expected hosts file clean (not re-applied) after external stop:\n%s", string(rawHosts))
+	}
+
+	finalSessions, _ := store.LoadSessions()
+	if len(finalSessions) != 2 {
+		t.Fatalf("expected exactly 2 session records, got %d: %+v", len(finalSessions), finalSessions)
+	}
+	for _, rec := range finalSessions {
+		if rec.Status == "running" || rec.Completed {
+			t.Fatalf("expected no running or completed records after external stop, got %+v", rec)
+		}
+	}
+}

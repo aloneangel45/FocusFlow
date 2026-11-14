@@ -35,6 +35,8 @@ def test_install_sh_lf_syntax_and_release_asset_alignment() -> None:
     assert 'ARCHIVE_NAME="${BIN_INNER}.tar.gz"' in text
     assert "checksums.txt" in text
     assert "SHA-256 checksum verification FAILED" in text
+    assert "${trimmed_ver#[vV]}" in text
+    assert r"sub(/^\357\273\277/" in text
     # Verify checksum check precedes tar extraction
     assert text.index("SHA-256 checksum verification FAILED") < text.index("tar -xzf")
 
@@ -102,7 +104,21 @@ def test_install_ps1_end_to_end_sha256_verification(tmp_path: Path) -> None:
         installed_exe = install_dir / "focusflow.exe"
         assert installed_exe.exists()
         assert "Verified SHA-256" in ok_run.stdout
-        assert "FocusFlow v2.2.0" in ok_run.stdout
+        assert "FocusFlow v2.2.1" in ok_run.stdout
+
+        # 1b. UTF-8 BOM in checksums.txt (emitted by PowerShell Set-Content -Encoding UTF8) must also succeed
+        bom_dir = tmp_path / "bom_install"
+        env["FOCUSFLOW_INSTALL_DIR"] = str(bom_dir)
+        checksums_file.write_bytes(b"\xef\xbb\xbf" + f"{good_sha256}  {archive_name}\r\n".encode("utf-8"))
+        bom_run = subprocess.run(
+            [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(install_ps1)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert bom_run.returncode == 0, f"install.ps1 failed on UTF-8 BOM checksums:\n{bom_run.stderr}"
+        assert (bom_dir / "focusflow.exe").exists()
 
         # 2. Tampered SHA-256 checksum -> MUST abort with non-zero exit code without overwriting/installing!
         tampered_dir = tmp_path / "tampered_install"

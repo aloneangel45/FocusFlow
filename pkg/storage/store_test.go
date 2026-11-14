@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +101,100 @@ func TestStore_LifecycleStreakAnalyticsAndExport(t *testing.T) {
 	csvStr := csvBuf.String()
 	if !strings.Contains(csvStr, "id,profile,start_time,end_time,duration_minutes") || !strings.Contains(csvStr, "orphan-99") {
 		t.Errorf("unexpected CSV output:\n%s", csvStr)
+	}
+}
+
+func TestStore_UTF8BOMZeroByteAndCorruptBackupRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// 1. UTF-8 BOM sessions.json must preserve existing history on read & subsequent write
+	bomSessions := "\xef\xbb\xbf{\n  \"sessions\": [\n    {\n      \"id\": \"hist-1\",\n      \"profile\": \"dev\",\n      \"start_time\": \"2026-06-15T10:00:00Z\",\n      \"duration_minutes\": 50,\n      \"completed\": true,\n      \"status\": \"completed\",\n      \"blocked_count\": 3\n    }\n  ]\n}\n"
+	if err := os.WriteFile(store.Path(), []byte(bomSessions), 0644); err != nil {
+		t.Fatalf("write BOM sessions: %v", err)
+	}
+	loaded, err := store.LoadSessions()
+	if err != nil || len(loaded) != 1 || loaded[0].ID != "hist-1" {
+		t.Fatalf("expected hist-1 loaded from BOM sessions.json, got len=%d err=%v", len(loaded), err)
+	}
+	startAt := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if err := store.StartSession("hist-2", "study", 25, startAt); err != nil {
+		t.Fatalf("StartSession after BOM: %v", err)
+	}
+	loadedAfter, _ := store.LoadSessions()
+	if len(loadedAfter) != 2 {
+		t.Fatalf("expected 2 sessions preserved after appending to BOM file, got %d", len(loadedAfter))
+	}
+
+	// 2. 0-byte sessions.json returns empty without .corrupt.bak
+	if err := os.WriteFile(store.Path(), []byte{}, 0644); err != nil {
+		t.Fatalf("write 0-byte sessions: %v", err)
+	}
+	emptyLoaded, err := store.LoadSessions()
+	if err != nil || len(emptyLoaded) != 0 {
+		t.Fatalf("expected empty sessions on 0-byte file, got %v (err=%v)", emptyLoaded, err)
+	}
+	if _, statErr := os.Stat(store.Path() + ".corrupt.bak"); !os.IsNotExist(statErr) {
+		t.Errorf("did not expect .corrupt.bak for 0-byte sessions.json")
+	}
+
+	// 3. Corrupted sessions.json creates .corrupt.bak and self-heals
+	corruptSessions := `{"sessions": [{"id": "broken"`
+	if err := os.WriteFile(store.Path(), []byte(corruptSessions), 0644); err != nil {
+		t.Fatalf("write corrupt sessions: %v", err)
+	}
+	healed, err := store.LoadSessions()
+	if err != nil || len(healed) != 0 {
+		t.Fatalf("expected healed empty slice on corrupt sessions.json, got %v (err=%v)", healed, err)
+	}
+	bakData, err := os.ReadFile(store.Path() + ".corrupt.bak")
+	if err != nil {
+		t.Fatalf("expected sessions.json.corrupt.bak to exist: %v", err)
+	}
+	if string(bakData) != corruptSessions {
+		t.Errorf("corrupt backup = %q, want %q", string(bakData), corruptSessions)
+	}
+}
+
+func TestStore_AbortActiveSessionsAndNoCompletedOverwrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	t0 := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if err := store.StartSession("unpriv-run-1", "study", 25, t0); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	if !store.IsSessionRunning("unpriv-run-1") {
+		t.Fatalf("expected IsSessionRunning(unpriv-run-1) == true")
+	}
+
+	// External stop without journal ID aborts all running sessions and computes elapsed minutes
+	aborted, err := store.AbortActiveSessions("", t0.Add(11*time.Minute+30*time.Second))
+	if err != nil || aborted != 1 {
+		t.Fatalf("expected 1 aborted session, got aborted=%d err=%v", aborted, err)
+	}
+	if store.IsSessionRunning("unpriv-run-1") {
+		t.Fatalf("expected IsSessionRunning(unpriv-run-1) == false after abort")
+	}
+
+	// Late FinalizeSession(completed=true) from racing process must NOT overwrite aborted status
+	_ = store.FinalizeSession("unpriv-run-1", "study", 25, true, "completed", 0, t0, t0.Add(25*time.Minute))
+
+	sessions, _ := store.LoadSessions()
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session record, got %d", len(sessions))
+	}
+	if sessions[0].Completed || sessions[0].Status != "aborted" || sessions[0].DurationMinutes != 11 {
+		t.Fatalf("expected aborted 11m record preserved, got %+v", sessions[0])
 	}
 }

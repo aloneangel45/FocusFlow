@@ -340,3 +340,71 @@ func TestDnsEngine_ExpandedDoHBypassDomains(t *testing.T) {
 		}
 	}
 }
+
+func TestHostsManager_ReadOnlyHostsApplyAndRollback(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	hostsPath := filepath.Join(tmpDir, "hosts")
+	cleanContent := "127.0.0.1 localhost\n::1 localhost\n"
+	if err := os.WriteFile(hostsPath, []byte(cleanContent), 0644); err != nil {
+		t.Fatalf("write hosts: %v", err)
+	}
+	if err := os.Chmod(hostsPath, 0444); err != nil {
+		t.Fatalf("chmod read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(hostsPath, 0644)
+	})
+
+	manager := NewHostsManagerWithState(hostsPath, tmpDir)
+	if err := manager.ApplyBlocklist([]string{"reddit.com"}); err != nil {
+		t.Fatalf("ApplyBlocklist on read-only hosts failed: %v", err)
+	}
+	if !manager.IsActive() {
+		t.Fatalf("expected sinkhole active on read-only hosts")
+	}
+
+	infoMid, err := os.Stat(hostsPath)
+	if err != nil {
+		t.Fatalf("stat mid-session: %v", err)
+	}
+	if infoMid.Mode().Perm()&0200 != 0 {
+		t.Errorf("expected read-only attribute preserved after apply, got mode %o", infoMid.Mode().Perm())
+	}
+
+	if err := manager.Rollback(); err != nil {
+		t.Fatalf("Rollback on read-only hosts failed: %v", err)
+	}
+	if manager.IsActive() {
+		t.Fatalf("expected sinkhole inactive after rollback")
+	}
+	restored, err := os.ReadFile(hostsPath)
+	if err != nil {
+		t.Fatalf("read restored hosts: %v", err)
+	}
+	if string(restored) != cleanContent {
+		t.Fatalf("restored hosts %q != %q", string(restored), cleanContent)
+	}
+}
+
+func TestHostsManager_JournalUTF8BOMTolerance(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+	hostsPath := filepath.Join(tmpDir, "hosts")
+	_ = os.WriteFile(hostsPath, []byte("127.0.0.1 localhost\n"), 0644)
+
+	manager := NewHostsManagerWithState(hostsPath, tmpDir)
+	bomJournal := "\xef\xbb\xbf{\n  \"session_id\": \"bom-sess-1\",\n  \"pid\": 1234,\n  \"profile\": \"dev\"\n}\n"
+	if err := os.WriteFile(manager.JournalPath(), []byte(bomJournal), 0644); err != nil {
+		t.Fatalf("write bom journal: %v", err)
+	}
+
+	j, err := manager.LoadJournal()
+	if err != nil {
+		t.Fatalf("LoadJournal failed on UTF-8 BOM: %v", err)
+	}
+	if j.SessionID != "bom-sess-1" || j.Profile != "dev" {
+		t.Fatalf("unexpected journal parsed from BOM file: %+v", j)
+	}
+}

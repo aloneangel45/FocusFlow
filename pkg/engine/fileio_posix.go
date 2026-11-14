@@ -45,17 +45,17 @@ func writeHostsFileSafe(hostsPath string, content []byte) error {
 		}
 		tmpPath := tmpFile.Name()
 
-		if err := tmpFile.Chmod(targetMode); err != nil {
-			_ = tmpFile.Close()
-			_ = os.Remove(tmpPath)
-			return err
-		}
 		if _, err := tmpFile.Write(content); err != nil {
 			_ = tmpFile.Close()
 			_ = os.Remove(tmpPath)
 			return err
 		}
 		if err := tmpFile.Sync(); err != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+			return err
+		}
+		if err := tmpFile.Chmod(targetMode); err != nil {
 			_ = tmpFile.Close()
 			_ = os.Remove(tmpPath)
 			return err

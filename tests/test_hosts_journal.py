@@ -212,3 +212,34 @@ def test_permissions_and_windows_acl_preservation(hermetic_focusflow_env: tuple[
         os.chmod(hosts_path, 0o644)
         hm.apply_blocklist(["example.com"])
         assert (os.stat(hosts_path).st_mode & 0o777) == 0o644
+
+
+def test_readonly_hosts_apply_and_rollback(hermetic_focusflow_env: tuple[Path, Path]) -> None:
+    state_dir, hosts_path = hermetic_focusflow_env
+    clean_text = "127.0.0.1 localhost\n::1 localhost\n"
+    hosts_path.write_text(clean_text, encoding="utf-8")
+    os.chmod(hosts_path, 0o444)
+    try:
+        hm = HostsManager(hosts_path=str(hosts_path), state_dir=str(state_dir))
+        assert hm.apply_blocklist(["reddit.com"]) is True
+        assert hm.is_active() is True
+        assert (os.stat(hosts_path).st_mode & 0o200) == 0
+
+        hm.rollback()
+        assert hm.is_active() is False
+        assert hosts_path.read_text(encoding="utf-8") == clean_text
+    finally:
+        os.chmod(hosts_path, 0o644)
+
+
+def test_journal_utf8_bom_tolerance(hermetic_focusflow_env: tuple[Path, Path]) -> None:
+    state_dir, hosts_path = hermetic_focusflow_env
+    hm = HostsManager(hosts_path=str(hosts_path), state_dir=str(state_dir))
+    Path(hm.journal_path).write_bytes(
+        b'\xef\xbb\xbf{"session_id": "bom-j-1", "pid": 4321, "profile": "dev"}\n'
+    )
+    loaded = hm.load_journal()
+    assert loaded is not None
+    assert loaded.session_id == "bom-j-1"
+    assert loaded.pid == 4321
+    assert loaded.profile == "dev"

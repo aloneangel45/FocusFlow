@@ -35,6 +35,8 @@ RESERVED_EXACT_DOMAINS: frozenset[str] = frozenset(
         "ip6-allnodes",
         "ip6-allrouters",
         "ip6-allhosts",
+        "home.arpa",
+        "invalid",
     }
 )
 
@@ -87,6 +89,12 @@ def _is_ip_literal(candidate: str) -> bool:
         return False
 
 
+def _is_reserved_domain(candidate: str) -> bool:
+    return candidate in RESERVED_EXACT_DOMAINS or candidate.endswith(
+        (".local", ".localhost", ".localdomain", ".home.arpa", ".invalid")
+    )
+
+
 def sanitize_domain(raw: str) -> str:
     """Strictly normalize and validate a domain name per RFC-1123.
 
@@ -114,7 +122,7 @@ def sanitize_domain(raw: str) -> str:
         s = s[len("https://") :]
     elif s.startswith("http://"):
         s = s[len("http://") :]
-    elif "://" in s:
+    elif "://" in s or s.startswith("//"):
         raise DomainValidationError("unsupported URL scheme")
 
     for sep in ("/", "?", "#"):
@@ -135,13 +143,15 @@ def sanitize_domain(raw: str) -> str:
         raise DomainValidationError("IPv6 literals cannot be blocked")
     if colon_count == 1:
         host_part, port_part = s.split(":", 1)
-        if not port_part.isdigit():
+        if not port_part or not port_part.isascii() or not port_part.isdigit():
             raise DomainValidationError("invalid port in domain")
         port_num = int(port_part)
         if port_num < 1 or port_num > 65535:
             raise DomainValidationError("port out of range")
         s = host_part
 
+    if s.endswith(".."):
+        raise DomainValidationError("invalid consecutive trailing dots in domain")
     if s.endswith("."):
         s = s[:-1]
     if not s:
@@ -150,17 +160,19 @@ def sanitize_domain(raw: str) -> str:
     if _is_ip_literal(s):
         raise DomainValidationError("IP literals cannot be blocked")
 
-    if s in RESERVED_EXACT_DOMAINS or s.endswith((".local", ".localhost", ".localdomain")):
+    if _is_reserved_domain(s):
         raise DomainValidationError("reserved or local domain cannot be blocked")
 
     if s.startswith("www."):
         rest = s[4:]
+        if not rest or _is_ip_literal(rest) or _is_reserved_domain(rest):
+            raise DomainValidationError("reserved or local domain cannot be blocked")
         if "." in rest:
             s = rest
 
     if _is_ip_literal(s):
         raise DomainValidationError("IP literals cannot be blocked")
-    if s in RESERVED_EXACT_DOMAINS or s.endswith((".local", ".localhost", ".localdomain")):
+    if _is_reserved_domain(s):
         raise DomainValidationError("reserved or local domain cannot be blocked")
 
     if len(s) > 253 or "." not in s:
@@ -176,7 +188,8 @@ def sanitize_domain(raw: str) -> str:
         if not _LABEL_RE.match(label):
             raise DomainValidationError("invalid RFC-1123 label characters")
 
-    if labels[-1].isdigit():
+    tld = labels[-1]
+    if len(tld) < 2 or not ("a" <= tld[0] <= "z"):
         raise DomainValidationError("numeric TLD or malformed IPv4 literal is not allowed")
 
     return s

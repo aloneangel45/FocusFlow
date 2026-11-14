@@ -16,7 +16,7 @@ from .config import (
     DEFAULT_DAILY_GOAL_MINUTES,
     normalize_daily_goal_minutes,
 )
-from .hosts import format_rfc3339_utc
+from .hosts import format_rfc3339_utc, parse_rfc3339
 from .paths import get_config_path, get_sessions_path, get_state_dir
 
 
@@ -43,6 +43,21 @@ class DailyGoalProgress:
 
 def generate_session_id() -> str:
     return secrets.token_hex(8)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
 
 
 @dataclasses.dataclass
@@ -76,16 +91,18 @@ class SessionRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "SessionRecord":
+        raw_profile = _safe_str(data.get("profile"), "study").strip() or "study"
+        raw_completed = data.get("completed", False)
         return cls(
-            id=str(data.get("id", "")),
-            profile=str(data.get("profile", "study")),
-            start_time=str(data.get("start_time", "")),
-            end_time=str(data.get("end_time", "")),
-            duration_minutes=int(data.get("duration_minutes", 0)),
-            planned_minutes=int(data.get("planned_minutes", 0)),
-            completed=bool(data.get("completed", False)),
-            status=str(data.get("status", "")),
-            blocked_count=int(data.get("blocked_count", 0)),
+            id=_safe_str(data.get("id"), ""),
+            profile=raw_profile,
+            start_time=_safe_str(data.get("start_time"), ""),
+            end_time=_safe_str(data.get("end_time"), ""),
+            duration_minutes=max(0, _safe_int(data.get("duration_minutes"), 0)),
+            planned_minutes=max(0, _safe_int(data.get("planned_minutes"), 0)),
+            completed=bool(raw_completed) if isinstance(raw_completed, bool) else False,
+            status=_safe_str(data.get("status"), ""),
+            blocked_count=max(0, _safe_int(data.get("blocked_count"), 0)),
         )
 
 
@@ -158,16 +175,54 @@ class SessionStore:
         self.path = get_sessions_path(self.state_dir)
         self._lock = threading.Lock()
 
+    def _backup_corrupted_locked(self, raw_bytes: bytes) -> None:
+        if not raw_bytes:
+            return
+        bak_path = f"{self.path}.corrupt.bak"
+        try:
+            with open(bak_path, "wb") as f:
+                f.write(raw_bytes)
+        except OSError:
+            pass
+
     def _read_locked(self) -> list[SessionRecord]:
         if not os.path.exists(self.path):
             return []
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
-                return [SessionRecord.from_dict(item) for item in raw["sessions"] if isinstance(item, dict)]
-        except Exception:
+            with open(self.path, "rb") as f:
+                raw_bytes = f.read()
+        except OSError:
             return []
+
+        clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
+        if not clean_bytes.strip():
+            return []
+
+        try:
+            raw = json.loads(clean_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._backup_corrupted_locked(raw_bytes)
+            try:
+                self._write_locked([])
+            except OSError:
+                pass
+            return []
+
+        if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
+            out: list[SessionRecord] = []
+            for item in raw["sessions"]:
+                if isinstance(item, dict):
+                    try:
+                        out.append(SessionRecord.from_dict(item))
+                    except Exception:
+                        continue
+            return out
+
+        self._backup_corrupted_locked(raw_bytes)
+        try:
+            self._write_locked([])
+        except OSError:
+            pass
         return []
 
     def _write_locked(self, sessions: list[SessionRecord]) -> None:
@@ -244,6 +299,8 @@ class SessionStore:
             if session_id:
                 for idx in range(len(sessions) - 1, -1, -1):
                     if sessions[idx].id == session_id:
+                        if completed and sessions[idx].status in ("aborted", "orphaned"):
+                            return
                         sessions[idx].duration_minutes = max(0, int(duration_minutes))
                         sessions[idx].completed = bool(completed)
                         sessions[idx].status = resolved_status
@@ -269,6 +326,50 @@ class SessionStore:
                     )
                 )
             self._write_locked(sessions)
+
+    def abort_active_sessions(
+        self,
+        session_id: str = "",
+        now: datetime.datetime | None = None,
+    ) -> int:
+        """Finalize any active 'running' sessions (and optional explicit session_id) as aborted."""
+        ended = (now or datetime.datetime.now(datetime.timezone.utc)).astimezone(datetime.timezone.utc)
+        aborted = 0
+        with self._lock:
+            sessions = self._read_locked()
+            for rec in sessions:
+                match_id = bool(session_id and rec.id == session_id)
+                if not match_id and rec.status != "running":
+                    continue
+                if rec.status == "running" or (match_id and not rec.completed and rec.status in ("", "running")):
+                    rec.completed = False
+                    rec.status = "aborted"
+                    if not rec.end_time:
+                        rec.end_time = format_rfc3339_utc(ended)
+                    if rec.duration_minutes == 0 and rec.start_time:
+                        started_dt = parse_rfc3339(rec.start_time)
+                        if started_dt is not None:
+                            elapsed_min = int((ended - started_dt).total_seconds() // 60)
+                            if elapsed_min < 0:
+                                elapsed_min = 0
+                            if rec.planned_minutes > 0 and elapsed_min > rec.planned_minutes:
+                                elapsed_min = rec.planned_minutes
+                            rec.duration_minutes = elapsed_min
+                    aborted += 1
+            if aborted > 0:
+                self._write_locked(sessions)
+        return aborted
+
+    def is_session_running(self, session_id: str) -> bool:
+        """Return True if session_id exists and currently has status == 'running'."""
+        if not session_id:
+            return False
+        with self._lock:
+            sessions = self._read_locked()
+            for idx in range(len(sessions) - 1, -1, -1):
+                if sessions[idx].id == session_id:
+                    return sessions[idx].status == "running"
+        return False
 
     def mark_orphaned_session(
         self,
@@ -297,7 +398,7 @@ class SessionStore:
         if not os.path.exists(cfg_path):
             return DEFAULT_DAILY_GOAL_MINUTES
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 return normalize_daily_goal_minutes(raw.get("daily_goal_minutes"))
@@ -413,7 +514,7 @@ class SessionStore:
         days: int = 7,
         now: datetime.datetime | None = None,
     ) -> str:
-        ref = now or datetime.datetime.now(datetime.timezone.utc)
+        ref = now or datetime.datetime.now().astimezone()
         sessions = self.load_sessions()
         summary = self.compute_analytics(days=days, now=ref)
         payload = {

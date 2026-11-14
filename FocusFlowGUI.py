@@ -1,5 +1,5 @@
 """
-FocusFlow v2.2.0 - Native Desktop Deep Work & Distraction Shield HUD
+FocusFlow v2.2.1 - Native Desktop Deep Work & Distraction Shield HUD
 Theme: Catppuccin Mocha Minimal Systems Architecture (Zero-Emoji)
 High-DPI Per-Monitor v2, Crash-Safe SHA-256 Hosts Engine, Win32 Toolhelp32 Supervisor
 """
@@ -145,9 +145,16 @@ class FrictionChallengeDialog(tk.Toplevel):
 
         # Render challenge code onto a Canvas so text cannot be highlighted or copied
         grouped = " - ".join(self.token[i : i + 4] for i in range(0, 16, 4))
-        canvas = tk.Canvas(container, width=460, height=56, bg=THEME["crust"], highlightthickness=1, highlightbackground=THEME["surface1"])
-        canvas.pack(fill="x", pady=(0, 14))
-        canvas.create_text(
+        self.canvas = tk.Canvas(
+            container,
+            width=460,
+            height=56,
+            bg=THEME["crust"],
+            highlightthickness=1,
+            highlightbackground=THEME["surface1"],
+        )
+        self.canvas.pack(fill="x", pady=(0, 14))
+        self._token_text_id = self.canvas.create_text(
             230,
             28,
             text=grouped,
@@ -222,7 +229,10 @@ class FrictionChallengeDialog(tk.Toplevel):
             self.destroy()
             return
         # Regenerate fresh token on mismatch to defeat partial brute-force / scripts
-        self.lbl_error.config(text="[ERR] Challenge mismatch. Stay on task or enter exact characters.")
+        self.token = generate_friction_token(16)
+        grouped = " - ".join(self.token[i : i + 4] for i in range(0, 16, 4))
+        self.canvas.itemconfig(self._token_text_id, text=grouped)
+        self.lbl_error.config(text="[ERR] Challenge mismatch. New code generated; enter all 16 characters.")
         self.entry.delete(0, "end")
 
     def _on_cancel(self) -> None:
@@ -306,14 +316,27 @@ class FocusFlowGUI:
         prefs_path = get_gui_settings_path(self.state_dir)
         if os.path.exists(prefs_path):
             try:
-                with open(prefs_path, "r", encoding="utf-8") as f:
+                with open(prefs_path, "r", encoding="utf-8-sig") as f:
                     saved = json.load(f)
                 if isinstance(saved, dict):
-                    for key in ("mode", "profile", "pomo_work", "pomo_break", "standard_duration", "flex_duration", "strict_mode"):
+                    for key in ("mode", "profile", "strict_mode"):
                         if key in saved:
                             self.gui_prefs[key] = saved[key]
+                    for int_key, default_val in (
+                        ("pomo_work", 25),
+                        ("pomo_break", 5),
+                        ("standard_duration", 60),
+                        ("flex_duration", 90),
+                    ):
+                        if int_key in saved and saved[int_key] is not None and not isinstance(saved[int_key], bool):
+                            try:
+                                self.gui_prefs[int_key] = max(1, min(720, int(saved[int_key])))
+                            except (TypeError, ValueError):
+                                self.gui_prefs[int_key] = default_val
                     if isinstance(saved.get("quotes"), list) and saved["quotes"]:
-                        self.gui_prefs["quotes"] = [str(q) for q in saved["quotes"] if str(q).strip()]
+                        valid_quotes = [str(q) for q in saved["quotes"] if q is not None and str(q).strip()]
+                        if valid_quotes:
+                            self.gui_prefs["quotes"] = valid_quotes
             except Exception:
                 pass
 
@@ -507,9 +530,17 @@ class FocusFlowGUI:
         selected = self.notebook.select()
         if selected == str(self.tab_stats):
             self.refresh_analytics_ui()
+        elif selected == str(self.tab_blocks):
+            self.refresh_lists()
         elif selected == str(self.tab_timer) and not self.is_active:
             self.config_store = load_config(state_dir=self.state_dir)
-            self.refresh_profile_selector()
+            valid_profiles = set(self.config_store.profiles.keys()) | {"study", "dev", "hardcore"}
+            if self.current_profile not in valid_profiles:
+                self.profile_var.set("study")
+                self.on_profile_change()
+            else:
+                self.refresh_profile_selector()
+                self.refresh_lists()
 
     # ---------------- TAB 1: FOCUS HUD ----------------
     def build_tab_timer(self) -> None:
@@ -1041,6 +1072,23 @@ class FocusFlowGUI:
             text=f"Active Rules: {len(merged.blocked_domains)} domains / {len(merged.blocked_processes)} procs"
         )
 
+    def _sync_active_session_rules(self) -> None:
+        if not self.is_active:
+            return
+        merged = load_or_default(self.current_profile, state_dir=self.state_dir)
+        self.active_profile_obj = merged
+        all_domains = [*merged.blocked_domains, *DOH_BYPASS_DOMAINS]
+        with self._supervisor_lock:
+            self._proc_supervisor = ProcessSupervisor(merged.blocked_processes)
+            self._active_sinkhole_domains = all_domains
+            meta = self._active_session_meta
+        if self.hosts_engaged and (self.pomo_state == "WORK" or self.current_strictness_level() == "hardcore"):
+            try:
+                self.hosts_manager.apply_blocklist(all_domains, meta=meta)
+                flush_dns_async()
+            except OSError:
+                pass
+
     def add_site(self) -> None:
         raw = self.ent_site.get()
         if not raw.strip():
@@ -1057,6 +1105,7 @@ class FocusFlowGUI:
             save_config(cfg, state_dir=self.state_dir)
         self.ent_site.delete(0, "end")
         self.refresh_lists()
+        self._sync_active_session_rules()
 
     def remove_site(self) -> None:
         if self.is_active and self.is_strict_active():
@@ -1074,6 +1123,7 @@ class FocusFlowGUI:
             cfg.custom_domains.remove(val)
             save_config(cfg, state_dir=self.state_dir)
             self.refresh_lists()
+            self._sync_active_session_rules()
 
     def reset_custom_sites(self) -> None:
         if self.is_active and self.is_strict_active():
@@ -1083,6 +1133,7 @@ class FocusFlowGUI:
         cfg.custom_domains = []
         save_config(cfg, state_dir=self.state_dir)
         self.refresh_lists()
+        self._sync_active_session_rules()
 
     def add_app(self) -> None:
         raw = self.ent_app.get()
@@ -1100,6 +1151,7 @@ class FocusFlowGUI:
             save_config(cfg, state_dir=self.state_dir)
         self.ent_app.delete(0, "end")
         self.refresh_lists()
+        self._sync_active_session_rules()
 
     def remove_app(self) -> None:
         if self.is_active and self.is_strict_active():
@@ -1117,6 +1169,7 @@ class FocusFlowGUI:
             cfg.custom_processes.remove(val)
             save_config(cfg, state_dir=self.state_dir)
             self.refresh_lists()
+            self._sync_active_session_rules()
 
     def reset_custom_apps(self) -> None:
         if self.is_active and self.is_strict_active():
@@ -1126,6 +1179,7 @@ class FocusFlowGUI:
         cfg.custom_processes = []
         save_config(cfg, state_dir=self.state_dir)
         self.refresh_lists()
+        self._sync_active_session_rules()
 
     # ---------------- TAB 3: ANALYTICS & EXPORTS ----------------
     def build_tab_stats(self) -> None:
@@ -1235,7 +1289,8 @@ class FocusFlowGUI:
             self.kpi_labels["rate"].config(
                 text=f"{summary.completion_rate:.0f}% ({summary.completed_sprints}/{summary.attempted_sprints})"
             )
-            self.kpi_labels["blocked"].config(text=str(summary.total_blocked + self.session_blocked_count))
+            live_blocks = self.session_blocked_count if self.active_session_id else 0
+            self.kpi_labels["blocked"].config(text=str(summary.total_blocked + live_blocks))
 
         if hasattr(self, "chart_canvas"):
             self.draw_stats_chart()
@@ -1743,13 +1798,42 @@ class FocusFlowGUI:
 
         threading.Thread(target=_worker, name="FocusFlowHostsRollback", daemon=True).start()
 
+    def _handle_external_stop(self) -> None:
+        if not self.is_active:
+            return
+        self.active_session_id = ""
+        self.active_session_start_utc = None
+        self.session_blocked_count = 0
+        self.hosts_engaged = False
+        with self._supervisor_lock:
+            self._active_sinkhole_domains = []
+            self._active_session_meta = None
+        self.phase_timer.stop()
+        self.is_active = False
+        self.pomo_state = "WORK"
+        self._set_controls_locked_for_session(False)
+        self.btn_toggle.config(text="[START FOCUS]", bg=THEME["green"], fg=THEME["crust"])
+        self.btn_break.config(text="[TAKE BREAK]", fg=THEME["yellow"], state="disabled")
+        self.btn_emergency.config(state="disabled")
+        self.lbl_mini_blocked.config(text="Session Blocks: 0")
+        self.lbl_status.config(text="[STANDBY] Session stopped externally — unrestricted system access", fg=THEME["yellow"])
+        self.on_mode_change()
+        self.refresh_analytics_ui()
+
     def stop_session(self, verified: bool = False, completed: bool = False) -> bool:
         if not self.is_active:
             return True
 
-        if not completed and not verified and self.pomo_state == "WORK" and self.is_strict_active():
+        requires_challenge = (self.pomo_state == "WORK" and self.is_strict_active()) or (
+            self.pomo_state == "BREAK" and self.current_strictness_level() == "hardcore"
+        )
+        if not completed and not verified and requires_challenge:
             if not self._verify_friction_challenge("CONFIRM EARLY SESSION ABORT"):
                 return False
+
+        if completed and self.active_session_id and not self.session_store.is_session_running(self.active_session_id):
+            self._handle_external_stop()
+            return True
 
         elapsed_min = max(0, self.phase_timer.elapsed_seconds() // 60)
         if completed:
@@ -1769,6 +1853,7 @@ class FocusFlowGUI:
             )
             self.active_session_id = ""
             self.active_session_start_utc = None
+            self.session_blocked_count = 0
 
         self.phase_timer.stop()
         self.is_active = False
@@ -1797,6 +1882,21 @@ class FocusFlowGUI:
             if self.is_strict_active() and not self.phase_timer.awaiting_transition:
                 if not self._verify_friction_challenge("EARLY BREAK REQUEST"):
                     return
+            if self.active_session_id:
+                elapsed_min = max(0, self.phase_timer.elapsed_seconds() // 60)
+                self.session_store.finalize_session(
+                    session_id=self.active_session_id,
+                    profile=self.current_profile,
+                    duration_minutes=elapsed_min,
+                    completed=False,
+                    blocked_count=self.session_blocked_count,
+                    status="aborted",
+                    start_time=self.active_session_start_utc,
+                )
+                self.active_session_id = ""
+                self.active_session_start_utc = None
+                self.session_blocked_count = 0
+                self.refresh_analytics_ui()
             self._enter_break_phase()
         else:
             self._enter_next_work_phase()
@@ -1804,11 +1904,36 @@ class FocusFlowGUI:
     def _enter_break_phase(self) -> None:
         self.pomo_state = "BREAK"
         mins = int(self.gui_prefs.get("pomo_break", 5))
-        self._release_work_shield_async()
+        continuous_lockdown = self.current_strictness_level() == "hardcore"
+        if continuous_lockdown:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            with self._supervisor_lock:
+                domains = list(self._active_sinkhole_domains)
+                meta = self._active_session_meta
+                if meta is not None:
+                    meta = SessionMeta(
+                        session_id=meta.session_id,
+                        pid=os.getpid(),
+                        started_at=meta.started_at,
+                        expected_end_at=now_utc + datetime.timedelta(minutes=max(1, mins)),
+                        profile=meta.profile,
+                    )
+                    self._active_session_meta = meta
+            if self.hosts_engaged and domains and meta is not None:
+                try:
+                    self.hosts_manager.apply_blocklist(domains, meta=meta)
+                except OSError:
+                    pass
+            self.lbl_status.config(
+                text="[BREAK] Hardcore lockdown continuous — distraction shield remains engaged",
+                fg=THEME["yellow"],
+            )
+        else:
+            self._release_work_shield_async()
+            self.lbl_status.config(text="[BREAK] Hosts unlocked — step away from the screen", fg=THEME["blue"])
         self.phase_timer.start(mins * 60, phase="BREAK")
         self.lbl_pomo_badge.config(text=f"RECOVERY BREAK ({mins} MIN)", fg=THEME["blue"])
         self.lbl_timer.config(fg=THEME["blue"])
-        self.lbl_status.config(text="[BREAK] Hosts unlocked — step away from the screen", fg=THEME["blue"])
         self.btn_break.config(text="[RESUME WORK]", fg=THEME["green"], state="normal")
 
     def _enter_next_work_phase(self) -> None:
@@ -1819,6 +1944,7 @@ class FocusFlowGUI:
         mins = int(self.gui_prefs.get("pomo_work", prof.default_work_minutes))
         self.active_planned_minutes = mins
         self.session_blocked_count = 0
+        self.lbl_mini_blocked.config(text="Session Blocks: 0")
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         self.active_session_start_utc = now_utc
@@ -1829,6 +1955,11 @@ class FocusFlowGUI:
             planned_minutes=mins,
             start_time=now_utc,
         )
+
+        strict_level = self.current_strictness_level()
+        with self._supervisor_lock:
+            self._proc_supervisor = ProcessSupervisor(prof.blocked_processes)
+            self._anticheat_guard = AntiCheatGuard(strict_level)
 
         self.phase_timer.start(mins * 60, phase="WORK")
         self._engage_work_shield(mins)
@@ -1869,7 +2000,10 @@ class FocusFlowGUI:
 
         if self.current_mode == "pomodoro":
             if self.pomo_state == "WORK":
-                # Record completed sprint & release hosts BEFORE modal; start break timer AFTER modal closes!
+                if self.active_session_id and not self.session_store.is_session_running(self.active_session_id):
+                    self._handle_external_stop()
+                    return
+                # Record completed sprint & release hosts (unless hardcore) BEFORE modal; start break timer AFTER modal closes!
                 if self.active_session_id:
                     self.session_store.finalize_session(
                         session_id=self.active_session_id,
@@ -1882,7 +2016,9 @@ class FocusFlowGUI:
                     )
                     self.active_session_id = ""
                     self.active_session_start_utc = None
-                self._release_work_shield_async()
+                    self.session_blocked_count = 0
+                if self.current_strictness_level() != "hardcore":
+                    self._release_work_shield_async()
                 self.lbl_timer.config(text="00:00")
                 self.draw_progress_bar(0.0)
                 self.refresh_analytics_ui()
@@ -1915,8 +2051,21 @@ class FocusFlowGUI:
         tick = 0
         while self.worker_running:
             time.sleep(2.0)
-            if not self.is_active or self.pomo_state != "WORK":
+            continuous_break = self.pomo_state == "BREAK" and self.current_strictness_level() == "hardcore"
+            if not self.is_active or (self.pomo_state != "WORK" and not continuous_break):
                 continue
+
+            sid = self.active_session_id
+            if self.pomo_state == "WORK" and sid and not self.session_store.is_session_running(sid):
+                self.root.after(0, self._handle_external_stop)
+                continue
+            if continuous_break and self.hosts_engaged:
+                try:
+                    if self.hosts_manager.load_journal() is None:
+                        self.root.after(0, self._handle_external_stop)
+                        continue
+                except Exception:
+                    pass
 
             tick += 1
             with self._supervisor_lock:
@@ -1943,7 +2092,7 @@ class FocusFlowGUI:
                 except Exception:
                     pass
 
-            if hits > 0:
+            if hits > 0 and self.pomo_state == "WORK":
                 self.session_blocked_count += hits
                 self.root.after(0, self._update_blocked_counter)
 
@@ -1952,7 +2101,10 @@ class FocusFlowGUI:
 
     def on_close(self) -> None:
         if self.is_active:
-            if self.pomo_state == "WORK" and self.is_strict_active():
+            requires_challenge = (self.pomo_state == "WORK" and self.is_strict_active()) or (
+                self.pomo_state == "BREAK" and self.current_strictness_level() == "hardcore"
+            )
+            if requires_challenge:
                 if not self._verify_friction_challenge("WINDOW CLOSE DURING STRICT SPRINT"):
                     return
             else:
@@ -1975,6 +2127,7 @@ class FocusFlowGUI:
                     start_time=self.active_session_start_utc,
                 )
                 self.active_session_id = ""
+                self.session_blocked_count = 0
             if self.hosts_engaged:
                 try:
                     self.hosts_manager.rollback()

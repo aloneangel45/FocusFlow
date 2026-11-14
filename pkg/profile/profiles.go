@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,26 +156,41 @@ func sanitizeProcessList(procs []string) []string {
 	return out
 }
 
+func newDefaultConfigStore() *ConfigStore {
+	return &ConfigStore{
+		CustomDomains:    []string{},
+		CustomProcesses:  []string{},
+		DailyGoalMinutes: DefaultDailyGoalMinutes,
+		Profiles:         DefaultProfiles(),
+	}
+}
+
 func LoadConfig() (*ConfigStore, error) {
 	path := GetConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			cfg := &ConfigStore{
-				CustomDomains:    []string{},
-				CustomProcesses:  []string{},
-				DailyGoalMinutes: DefaultDailyGoalMinutes,
-				Profiles:         DefaultProfiles(),
-			}
+			cfg := newDefaultConfigStore()
 			_ = SaveConfig(cfg)
 			return cfg, nil
 		}
 		return nil, err
 	}
 
+	clean := bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	trimmed := bytes.TrimSpace(clean)
+	if len(trimmed) == 0 {
+		cfg := newDefaultConfigStore()
+		_ = SaveConfig(cfg)
+		return cfg, nil
+	}
+
 	var compat rawConfigCompat
-	if err := json.Unmarshal(data, &compat); err != nil {
-		return nil, err
+	if trimmed[0] != '{' || json.Unmarshal(trimmed, &compat) != nil {
+		_ = os.WriteFile(path+".corrupt.bak", data, 0644)
+		cfg := newDefaultConfigStore()
+		_ = SaveConfig(cfg)
+		return cfg, nil
 	}
 
 	mergedDomains := append([]string{}, compat.CustomDomains...)
@@ -198,9 +214,13 @@ func LoadConfig() (*ConfigStore, error) {
 		pCopy.BlockedProcesses = sanitizeProcessList(p.BlockedProcesses)
 		if pCopy.DefaultWorkMinutes <= 0 {
 			pCopy.DefaultWorkMinutes = 25
+		} else if pCopy.DefaultWorkMinutes > 720 {
+			pCopy.DefaultWorkMinutes = 720
 		}
 		if pCopy.DefaultBreakMinutes < 0 {
 			pCopy.DefaultBreakMinutes = 5
+		} else if pCopy.DefaultBreakMinutes > 120 {
+			pCopy.DefaultBreakMinutes = 120
 		}
 		normalizedProfiles[key] = &pCopy
 	}

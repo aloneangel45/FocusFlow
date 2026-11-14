@@ -30,6 +30,8 @@ LEGACY_MARKER_BEGIN = "# --- FOCUSFLOW BLOCK START ---"
 LEGACY_MARKER_END = "# --- FOCUSFLOW BLOCK END ---"
 
 REPLACEFILE_IGNORE_MERGE_ERRORS = 0x00000002
+FILE_ATTRIBUTE_READONLY = 0x00000001
+INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 MAX_WRITE_RETRIES = 5
 WRITE_RETRY_BACKOFF_SECONDS = 0.040
 WIN32_SHARING_WINERRORS = frozenset({32, 33})
@@ -47,6 +49,10 @@ if sys.platform == "win32":
         wintypes.LPVOID,
     ]
     _k32.ReplaceFileW.restype = wintypes.BOOL
+    _k32.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
+    _k32.GetFileAttributesW.restype = wintypes.DWORD
+    _k32.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+    _k32.SetFileAttributesW.restype = wintypes.BOOL
 
 
 @dataclasses.dataclass
@@ -65,15 +71,20 @@ class HostsJournal:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "HostsJournal":
+        raw_pid = data.get("pid", 0)
+        try:
+            pid_val = int(raw_pid) if raw_pid is not None and not isinstance(raw_pid, bool) else 0
+        except (TypeError, ValueError):
+            pid_val = 0
         return cls(
-            original_sha256=str(data.get("original_sha256", "")),
-            backup_path=str(data.get("backup_path", "")),
-            hosts_path=str(data.get("hosts_path", "")),
-            session_id=str(data.get("session_id", "")),
-            pid=int(data.get("pid", 0)),
-            started_at=str(data.get("started_at", "")),
-            expected_end_at=str(data.get("expected_end_at", "")),
-            profile=str(data.get("profile", "study")),
+            original_sha256=str(data.get("original_sha256") or ""),
+            backup_path=str(data.get("backup_path") or ""),
+            hosts_path=str(data.get("hosts_path") or ""),
+            session_id=str(data.get("session_id") or ""),
+            pid=pid_val,
+            started_at=str(data.get("started_at") or ""),
+            expected_end_at=str(data.get("expected_end_at") or ""),
+            profile=str(data.get("profile") or "study"),
         )
 
 
@@ -335,48 +346,57 @@ def write_hosts_file_safe(hosts_path: str, content: bytes) -> None:
         raise
 
     if sys.platform == "win32" and target_exists:
-        last_winerr = 0
-        for attempt in range(MAX_WRITE_RETRIES):
-            ok = bool(
-                _k32.ReplaceFileW(
-                    hosts_path,
-                    tmp_path,
-                    None,
-                    REPLACEFILE_IGNORE_MERGE_ERRORS,
-                    None,
-                    None,
-                )
-            )
-            if ok:
-                return
-            last_winerr = ctypes.get_last_error()
-            if attempt + 1 < MAX_WRITE_RETRIES:
-                time.sleep(WRITE_RETRY_BACKOFF_SECONDS)
-
+        orig_attrs = _k32.GetFileAttributesW(hosts_path)
+        cleared_readonly = False
+        if orig_attrs != INVALID_FILE_ATTRIBUTES and (orig_attrs & FILE_ATTRIBUTE_READONLY):
+            if bool(_k32.SetFileAttributesW(hosts_path, orig_attrs & ~FILE_ATTRIBUTE_READONLY)):
+                cleared_readonly = True
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-        last_exc: OSError | None = None
-        for attempt in range(MAX_WRITE_RETRIES):
-            try:
-                with open(hosts_path, "r+b") as f:
-                    f.seek(0)
-                    f.write(content)
-                    f.truncate()
-                    f.flush()
-                    os.fsync(f.fileno())
-                return
-            except OSError as exc:
-                last_exc = exc
+            last_winerr = 0
+            for attempt in range(MAX_WRITE_RETRIES):
+                ok = bool(
+                    _k32.ReplaceFileW(
+                        hosts_path,
+                        tmp_path,
+                        None,
+                        REPLACEFILE_IGNORE_MERGE_ERRORS,
+                        None,
+                        None,
+                    )
+                )
+                if ok:
+                    return
+                last_winerr = ctypes.get_last_error()
                 if attempt + 1 < MAX_WRITE_RETRIES:
                     time.sleep(WRITE_RETRY_BACKOFF_SECONDS)
-                    continue
-                raise
-        if last_exc is not None:
-            raise last_exc
-        raise OSError(last_winerr, f"ReplaceFileW failed on {hosts_path}")
+
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+            last_exc: OSError | None = None
+            for attempt in range(MAX_WRITE_RETRIES):
+                try:
+                    with open(hosts_path, "r+b") as f:
+                        f.seek(0)
+                        f.write(content)
+                        f.truncate()
+                        f.flush()
+                        os.fsync(f.fileno())
+                    return
+                except OSError as exc:
+                    last_exc = exc
+                    if attempt + 1 < MAX_WRITE_RETRIES:
+                        time.sleep(WRITE_RETRY_BACKOFF_SECONDS)
+                        continue
+                    raise
+            if last_exc is not None:
+                raise last_exc
+            raise OSError(last_winerr, f"ReplaceFileW failed on {hosts_path}")
+        finally:
+            if cleared_readonly:
+                _k32.SetFileAttributesW(hosts_path, orig_attrs)
 
     last_err: OSError | None = None
     for attempt in range(MAX_WRITE_RETRIES):
@@ -432,7 +452,7 @@ class HostsManager:
     def load_journal(self) -> HostsJournal | None:
         if not os.path.exists(self.journal_path):
             return None
-        with open(self.journal_path, "r", encoding="utf-8") as f:
+        with open(self.journal_path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
             raise ValueError("corrupt journal structure")

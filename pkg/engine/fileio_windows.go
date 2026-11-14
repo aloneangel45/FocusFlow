@@ -89,7 +89,9 @@ func writeHostsFileSafe(hostsPath string, content []byte) error {
 		return lastErr
 	}
 
-	// Target exists: use Win32 ReplaceFileW to atomically swap data while preserving target DACLs
+	// Target exists: use Win32 ReplaceFileW to atomically swap data while preserving target DACLs.
+	// If the target hosts file has FILE_ATTRIBUTE_READONLY set (common with security tools/GPOs),
+	// temporarily clear READONLY for the atomic swap and restore original attributes afterward.
 	targetPtr, err := syscall.UTF16PtrFromString(hostsPath)
 	if err != nil {
 		_ = os.Remove(tmpPath)
@@ -99,6 +101,19 @@ func writeHostsFileSafe(hostsPath string, content []byte) error {
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		return err
+	}
+
+	origAttrs, attrErr := syscall.GetFileAttributes(targetPtr)
+	if attrErr == nil && (origAttrs&syscall.FILE_ATTRIBUTE_READONLY) != 0 {
+		writableAttrs := origAttrs &^ syscall.FILE_ATTRIBUTE_READONLY
+		if writableAttrs == 0 {
+			writableAttrs = syscall.FILE_ATTRIBUTE_NORMAL
+		}
+		if clearErr := syscall.SetFileAttributes(targetPtr, writableAttrs); clearErr == nil {
+			defer func() {
+				_ = syscall.SetFileAttributes(targetPtr, origAttrs)
+			}()
+		}
 	}
 
 	var lastReplaceErr error

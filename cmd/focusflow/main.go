@@ -22,7 +22,7 @@ import (
 )
 
 // Version is set at build time via -ldflags "-X main.Version=..."
-var Version = "2.2.0"
+var Version = "2.2.1"
 
 func main() {
 	os.Exit(runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -72,7 +72,7 @@ func runCLI(rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Run automatic orphan journal recovery before regular commands
 	if command != "version" && command != "--version" && command != "-v" &&
 		command != "help" && command != "--help" && command != "-h" &&
-		command != "doctor" && command != "recover" {
+		command != "doctor" && command != "recover" && command != "stop" {
 		_, _ = runStartupAutoRecovery()
 	}
 
@@ -80,11 +80,11 @@ func runCLI(rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "start":
 		return handleStart(subArgs, stdout, stderr)
 	case "stop":
-		return handleStop(stdout, stderr)
+		return handleStop(subArgs, stdout, stderr)
 	case "status":
 		return handleStatus(subArgs, stdout, stderr)
 	case "flush":
-		return handleFlush(stdout, stderr)
+		return handleFlush(subArgs, stdout, stderr)
 	case "stats":
 		return handleStats(subArgs, stdout, stderr)
 	case "export":
@@ -215,7 +215,7 @@ func handleInteractiveMenu(stdin io.Reader, stdout, stderr io.Writer) int {
 				_ = handleRemove([]string{itemType, name}, stdout, stderr)
 			}
 		case "8":
-			_ = handleStop(stdout, stderr)
+			_ = handleStop(nil, stdout, stderr)
 		case "9":
 			_ = handleStats(nil, stdout, stderr)
 		case "0", "exit", "q":
@@ -241,7 +241,12 @@ func handleListConfig(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, "Output configuration as JSON")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow list [--json]\n", posArgs[0])
 		return 1
 	}
 
@@ -305,13 +310,20 @@ func handleListConfig(args []string, stdout, stderr io.Writer) int {
 }
 
 func handleAdd(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 2 {
-		_, _ = fmt.Fprintln(stderr, "Usage: focusflow add site <domain>  OR  focusflow add app <proc.exe>")
+	fs := flag.NewFlagSet("add", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "Output result as JSON")
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) != 2 {
+		_, _ = fmt.Fprintln(stderr, "Usage: focusflow add site <domain> [--json]  OR  focusflow add app <proc.exe> [--json]")
 		return 1
 	}
 
-	itemType := strings.ToLower(strings.TrimSpace(args[0]))
-	rawValue := args[1]
+	itemType := strings.ToLower(strings.TrimSpace(posArgs[0]))
+	rawValue := posArgs[1]
 
 	cfg, err := profile.LoadConfig()
 	if err != nil {
@@ -328,6 +340,12 @@ func handleAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		for _, d := range cfg.CustomDomains {
 			if d == cleanDomain {
+				if *asJSON {
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					_ = enc.Encode(map[string]any{"added": false, "already_present": true, "type": "site", "value": cleanDomain})
+					return 0
+				}
 				_, _ = fmt.Fprintf(stdout, "[INFO] Domain '%s' is already in custom blocklist.\n", cleanDomain)
 				return 0
 			}
@@ -336,6 +354,12 @@ func handleAdd(args []string, stdout, stderr io.Writer) int {
 		if err := profile.SaveConfig(cfg); err != nil {
 			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
 			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"added": true, "type": "site", "value": cleanDomain})
+			return 0
 		}
 		_, _ = fmt.Fprintf(stdout, "[OK] Added '%s' to custom blocked websites.\n", cleanDomain)
 		return 0
@@ -348,6 +372,12 @@ func handleAdd(args []string, stdout, stderr io.Writer) int {
 		}
 		for _, p := range cfg.CustomProcesses {
 			if p == cleanProc {
+				if *asJSON {
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					_ = enc.Encode(map[string]any{"added": false, "already_present": true, "type": "app", "value": cleanProc})
+					return 0
+				}
 				_, _ = fmt.Fprintf(stdout, "[INFO] Application '%s' is already in custom blocklist.\n", cleanProc)
 				return 0
 			}
@@ -356,6 +386,12 @@ func handleAdd(args []string, stdout, stderr io.Writer) int {
 		if err := profile.SaveConfig(cfg); err != nil {
 			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
 			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"added": true, "type": "app", "value": cleanProc})
+			return 0
 		}
 		_, _ = fmt.Fprintf(stdout, "[OK] Added '%s' to custom blocked applications.\n", cleanProc)
 		return 0
@@ -367,13 +403,20 @@ func handleAdd(args []string, stdout, stderr io.Writer) int {
 }
 
 func handleRemove(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 2 {
-		_, _ = fmt.Fprintln(stderr, "Usage: focusflow remove site <domain>  OR  focusflow remove app <proc.exe>")
+	fs := flag.NewFlagSet("remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "Output result as JSON")
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) != 2 {
+		_, _ = fmt.Fprintln(stderr, "Usage: focusflow remove site <domain> [--json]  OR  focusflow remove app <proc.exe> [--json]")
 		return 1
 	}
 
-	itemType := strings.ToLower(strings.TrimSpace(args[0]))
-	rawValue := strings.TrimSpace(args[1])
+	itemType := strings.ToLower(strings.TrimSpace(posArgs[0]))
+	rawValue := strings.TrimSpace(posArgs[1])
 
 	cfg, err := profile.LoadConfig()
 	if err != nil {
@@ -405,11 +448,20 @@ func handleRemove(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
 			return 1
 		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"removed": true, "type": "site", "value": target})
+			return 0
+		}
 		_, _ = fmt.Fprintf(stdout, "[OK] Removed '%s' from custom blocked websites.\n", target)
 		return 0
 
 	case "app", "proc", "process", "exe":
 		target := strings.ToLower(rawValue)
+		if idx := strings.LastIndexAny(target, `/\`); idx >= 0 {
+			target = target[idx+1:]
+		}
 		if !strings.HasSuffix(target, ".exe") {
 			target += ".exe"
 		}
@@ -430,6 +482,12 @@ func handleRemove(args []string, stdout, stderr io.Writer) int {
 		if err := profile.SaveConfig(cfg); err != nil {
 			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
 			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"removed": true, "type": "app", "value": target})
+			return 0
 		}
 		_, _ = fmt.Fprintf(stdout, "[OK] Removed '%s' from custom blocked applications.\n", target)
 		return 0
@@ -474,7 +532,27 @@ func toProfileJSONItem(p *profile.FocusProfile) profileJSONItem {
 	}
 }
 
-func splitPositionalAndFlags(args []string, boolFlags map[string]bool) ([]string, []string) {
+type boolFlagValue interface {
+	IsBoolFlag() bool
+}
+
+func lookupRegisteredFlag(fs *flag.FlagSet, name string) (registered bool, isBool bool) {
+	if name == "h" || name == "help" {
+		return true, true
+	}
+	f := fs.Lookup(name)
+	if f == nil {
+		return false, false
+	}
+	if bf, ok := f.Value.(boolFlagValue); ok && bf.IsBoolFlag() {
+		return true, true
+	}
+	return true, false
+}
+
+// parseInterspersedFlags parses flags regardless of whether they appear before or after
+// positional arguments, without letting unknown flags swallow positional tokens.
+func parseInterspersedFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	var posArgs []string
 	var flagArgs []string
 	for i := 0; i < len(args); i++ {
@@ -489,7 +567,8 @@ func splitPositionalAndFlags(args []string, boolFlags map[string]bool) ([]string
 				continue
 			}
 			flagName := strings.TrimLeft(tok, "-")
-			if boolFlags[flagName] {
+			registered, isBool := lookupRegisteredFlag(fs, flagName)
+			if !registered || isBool {
 				continue
 			}
 			if i+1 < len(args) {
@@ -500,7 +579,13 @@ func splitPositionalAndFlags(args []string, boolFlags map[string]bool) ([]string
 		}
 		posArgs = append(posArgs, tok)
 	}
-	return posArgs, flagArgs
+	if err := fs.Parse(flagArgs); err != nil {
+		return nil, err
+	}
+	if fs.NArg() > 0 {
+		posArgs = append(posArgs, fs.Args()...)
+	}
+	return posArgs, nil
 }
 
 func splitCSVArg(raw string) []string {
@@ -532,7 +617,12 @@ func handleProfile(args []string, stdout, stderr io.Writer) int {
 		fs := flag.NewFlagSet("profile list", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		asJSON := fs.Bool("json", false, "Output profiles as JSON")
-		if err := fs.Parse(rest); err != nil {
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
+			return 1
+		}
+		if len(posArgs) > 0 {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow profile list [--json]\n", posArgs[0])
 			return 1
 		}
 		cfg, err := profile.LoadConfig()
@@ -566,14 +656,14 @@ func handleProfile(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "show", "info", "get":
-		posArgs, flagArgs := splitPositionalAndFlags(rest, map[string]bool{"json": true, "h": true, "help": true})
 		fs := flag.NewFlagSet("profile show", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		asJSON := fs.Bool("json", false, "Output profile details as JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
 			return 1
 		}
-		if len(posArgs) < 1 {
+		if len(posArgs) != 1 {
 			_, _ = fmt.Fprintln(stderr, "Usage: focusflow profile show <name> [--json]")
 			return 1
 		}
@@ -620,7 +710,6 @@ func handleProfile(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "create", "set", "save", "upsert":
-		posArgs, flagArgs := splitPositionalAndFlags(rest, map[string]bool{"json": true, "h": true, "help": true})
 		fs := flag.NewFlagSet("profile create", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		workMin := fs.Int("minutes", 25, "Default work duration in minutes (1..720)")
@@ -630,10 +719,11 @@ func handleProfile(args []string, stdout, stderr io.Writer) int {
 		desc := fs.String("desc", "", "Profile description")
 		fromProf := fs.String("from", "", "Clone initial settings & rules from existing profile")
 		asJSON := fs.Bool("json", false, "Output created/updated profile as JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
 			return 1
 		}
-		if len(posArgs) < 1 {
+		if len(posArgs) != 1 {
 			_, _ = fmt.Fprintln(stderr, "Usage: focusflow profile create <name> [--minutes 45] [--break 10] [--sites a.com,b.com] [--apps slack.exe] [--desc \"...\"] [--from study] [--json]")
 			return 1
 		}
@@ -700,14 +790,14 @@ func handleProfile(args []string, stdout, stderr io.Writer) int {
 		return 0
 
 	case "delete", "rm", "remove":
-		posArgs, flagArgs := splitPositionalAndFlags(rest, map[string]bool{"json": true, "h": true, "help": true})
 		fs := flag.NewFlagSet("profile delete", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		asJSON := fs.Bool("json", false, "Output deletion result as JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
 			return 1
 		}
-		if len(posArgs) < 1 {
+		if len(posArgs) != 1 {
 			_, _ = fmt.Fprintln(stderr, "Usage: focusflow profile delete <name> [--json]")
 			return 1
 		}
@@ -751,12 +841,16 @@ type goalJSONOutput struct {
 }
 
 func handleGoal(args []string, stdout, stderr io.Writer) int {
-	_, flagArgs := splitPositionalAndFlags(args, map[string]bool{"json": true, "h": true, "help": true})
 	fs := flag.NewFlagSet("goal", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	minutes := fs.Int("minutes", 0, "Set daily focus goal in minutes (5..1440)")
 	asJSON := fs.Bool("json", false, "Output daily goal status as JSON")
-	if err := fs.Parse(flagArgs); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow goal [--minutes <n>] [--json]\n", posArgs[0])
 		return 1
 	}
 
@@ -835,8 +929,32 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	breakFlag := fs.Int("break", -1, "Break duration in minutes between cycles (0..120)")
 	breakSecondsOverride := fs.Int("break-seconds", 0, "Break duration override in seconds (for rapid testing)")
 	strictness := fs.String("strict", "", "Strictness level: relaxed, standard, hardcore")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
 		return 1
+	}
+
+	profileVisited := false
+	breakVisited := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "profile" {
+			profileVisited = true
+		}
+		if f.Name == "break" {
+			breakVisited = true
+		}
+	})
+
+	if len(posArgs) > 1 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow start [<profile>] [options]\n", posArgs[1])
+		return 1
+	}
+	if len(posArgs) == 1 {
+		if profileVisited {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot specify both positional profile %q and --profile %q.\n", posArgs[0], *profileName)
+			return 1
+		}
+		*profileName = posArgs[0]
 	}
 
 	if *cycles < 1 || *cycles > 24 {
@@ -862,12 +980,6 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	}
 
 	breakMin := prof.DefaultBreakMinutes
-	breakVisited := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "break" {
-			breakVisited = true
-		}
-	})
 	if breakVisited {
 		if *breakFlag < 0 || *breakFlag > 120 {
 			_, _ = fmt.Fprintln(stderr, "[ERR] --break must be between 0 and 120 minutes.")
@@ -987,6 +1099,14 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 
 			case <-workTicker.C:
 				tickCount++
+				// Detect external stop/abort (e.g. `focusflow stop` or `focusflow recover --force` from another terminal)
+				if store != nil && !store.IsSessionRunning(sessionID) {
+					workTicker.Stop()
+					hostsEngaged = false
+					_, _ = fmt.Fprintln(stdout, "\n\n  [INFO] Session externally stopped. Exiting sprint cleanly.")
+					return 0
+				}
+
 				rem := time.Until(deadline)
 				elapsedSeconds := workSeconds - int(rem.Seconds())
 				if elapsedSeconds < 0 {
@@ -1069,6 +1189,15 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 
 				case <-breakTicker.C:
 					breakTicks++
+					if hostsEngaged {
+						if j, jErr := hosts.LoadJournal(); jErr != nil || j == nil {
+							breakTicker.Stop()
+							hostsEngaged = false
+							_, _ = fmt.Fprintln(stdout, "\n\n  [INFO] Shield externally stopped during break. Exiting cleanly.")
+							return 0
+						}
+					}
+
 					rem := time.Until(breakDeadline)
 					elapsedBreak := breakSeconds - int(rem.Seconds())
 					if elapsedBreak < 0 {
@@ -1108,8 +1237,28 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	return 0
 }
 
-func handleStop(stdout, stderr io.Writer) int {
-	_, _ = fmt.Fprintln(stdout, "  [INFO] Rolling back hosts file and flushing DNS...")
+type stopJSONOutput struct {
+	Stopped         bool   `json:"stopped"`
+	SessionID       string `json:"session_id,omitempty"`
+	AbortedSessions int    `json:"aborted_sessions"`
+}
+
+func handleStop(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "Output stop result as JSON")
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow stop [--json]\n", posArgs[0])
+		return 1
+	}
+
+	if !*asJSON {
+		_, _ = fmt.Fprintln(stdout, "  [INFO] Rolling back hosts file and flushing DNS...")
+	}
 	hosts := engine.NewHostsManager()
 	dns := &engine.DnsEngine{}
 
@@ -1119,17 +1268,30 @@ func handleStop(stdout, stderr io.Writer) int {
 	}
 
 	if err := hosts.Rollback(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "  [ERR] Rollback failed: %v (re-run with --elevate if permission denied)\n", err)
+		if *asJSON {
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"stopped": false, "error": err.Error()})
+		} else {
+			_, _ = fmt.Fprintf(stderr, "  [ERR] Rollback failed: %v (re-run with --elevate if permission denied)\n", err)
+		}
 		return 1
 	}
 
-	if journalSessionID != "" {
-		if store, err := storage.NewStore(); err == nil {
-			_, _ = store.MarkOrphanedSession(journalSessionID, time.Now().UTC())
-		}
+	abortedCount := 0
+	if store, err := storage.NewStore(); err == nil {
+		abortedCount, _ = store.AbortActiveSessions(journalSessionID, time.Now().UTC())
 	}
 
 	_ = dns.FlushResolverCache()
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(stopJSONOutput{
+			Stopped:         true,
+			SessionID:       journalSessionID,
+			AbortedSessions: abortedCount,
+		})
+		return 0
+	}
 	_, _ = fmt.Fprintln(stdout, "  [OK] Clean rollback complete. Unrestricted access restored.")
 	return 0
 }
@@ -1151,7 +1313,12 @@ func handleStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, "Output status as JSON")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow status [--json]\n", posArgs[0])
 		return 1
 	}
 
@@ -1208,12 +1375,36 @@ func handleStatus(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func handleFlush(stdout, stderr io.Writer) int {
-	_, _ = fmt.Fprint(stdout, "  [INFO] Purging DNS resolver cache... ")
+func handleFlush(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("flush", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "Output flush result as JSON")
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow flush [--json]\n", posArgs[0])
+		return 1
+	}
+
+	if !*asJSON {
+		_, _ = fmt.Fprint(stdout, "  [INFO] Purging DNS resolver cache... ")
+	}
 	dns := &engine.DnsEngine{}
 	if err := dns.FlushResolverCache(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "[ERR] FAILED (%v)\n", err)
+		if *asJSON {
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"flushed": false, "error": err.Error()})
+		} else {
+			_, _ = fmt.Fprintf(stderr, "[ERR] FAILED (%v)\n", err)
+		}
 		return 1
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{"flushed": true})
+		return 0
 	}
 	_, _ = fmt.Fprintln(stdout, "[OK]")
 	return 0
@@ -1224,7 +1415,12 @@ func handleStats(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	days := fs.Int("days", 7, "Number of days for historical bar chart")
 	asJSON := fs.Bool("json", false, "Output statistics as JSON")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow stats [--days <n>] [--json]\n", posArgs[0])
 		return 1
 	}
 
@@ -1272,7 +1468,12 @@ func handleExport(args []string, stdout, stderr io.Writer) int {
 	format := fs.String("format", "json", "Export format: json or csv")
 	outPath := fs.String("out", "", "Output file path (defaults to stdout)")
 	days := fs.Int("days", 7, "Summary window in days for JSON export")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow export [--format json|csv] [--out <file>] [--days <n>]\n", posArgs[0])
 		return 1
 	}
 
@@ -1352,7 +1553,12 @@ func handleDoctor(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, "Output diagnostic report as JSON")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow doctor [--json]\n", posArgs[0])
 		return 1
 	}
 
@@ -1418,7 +1624,12 @@ func handleRecover(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "Force rollback even if owning PID appears alive")
 	asJSON := fs.Bool("json", false, "Output recovery result as JSON")
-	if err := fs.Parse(args); err != nil {
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow recover [--force] [--json]\n", posArgs[0])
 		return 1
 	}
 

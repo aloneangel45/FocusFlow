@@ -2,7 +2,7 @@
 # Usage:
 #   irm https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.ps1 | iex
 # Optional environment variables:
-#   $env:FOCUSFLOW_VERSION        Release tag to install (e.g. "v2.2.0" or "latest", default: "latest")
+#   $env:FOCUSFLOW_VERSION        Release tag to install (e.g. "v2.2.1" or "latest", default: "latest")
 #   $env:FOCUSFLOW_INSTALL_DIR    Target installation directory (default: "$env:LOCALAPPDATA\Programs\FocusFlow")
 #   $env:FOCUSFLOW_REPO           GitHub owner/repo (default: "aloneangel45/FocusFlow")
 #   $env:FOCUSFLOW_BASE_URL       Override release download base URL (for mirrors/testing)
@@ -52,12 +52,13 @@ function Get-FocusFlowBaseUrl([string]$Repo, [string]$Version) {
 }
 
 function Get-ExpectedSha256([string]$ChecksumsContent, [string]$AssetName) {
-    foreach ($line in ($ChecksumsContent -split "`r?`n")) {
-        $trimmed = $line.Trim()
+    $cleanContent = $ChecksumsContent.TrimStart([char]0xFEFF)
+    foreach ($line in ($cleanContent -split "`r?`n")) {
+        $trimmed = $line.Trim().TrimStart([char]0xFEFF)
         if (-not $trimmed) { continue }
         $parts = $trimmed -split '\s+', 2
         if ($parts.Count -lt 2) { continue }
-        $hashCandidate = $parts[0].Trim().ToLowerInvariant()
+        $hashCandidate = $parts[0].Trim().TrimStart([char]0xFEFF).ToLowerInvariant()
         $fileCandidate = $parts[1].Trim().TrimStart('*')
         if ($fileCandidate -eq $AssetName) {
             if ($hashCandidate -notmatch '^[0-9a-f]{64}$') {

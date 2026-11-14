@@ -1,6 +1,6 @@
-"""FocusFlow v2.2.0 unified standard-library core engine."""
+"""FocusFlow v2.2.1 unified standard-library core engine."""
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 from .paths import (
     get_backup_path,

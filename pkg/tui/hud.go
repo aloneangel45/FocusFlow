@@ -9,7 +9,7 @@ import (
 	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
-const DefaultVersion = "2.2.0"
+const DefaultVersion = "2.2.1"
 
 func FormatBanner(version string) string {
 	if strings.TrimSpace(version) == "" {

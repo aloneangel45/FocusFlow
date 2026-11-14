@@ -244,3 +244,140 @@ def test_gui_profile_switching_strict_close_and_single_prompt_unlock(
         except Exception:
             pass
 
+
+def test_export_json_string_local_timezone_parity(
+    hermetic_focusflow_env: tuple[Path, Path],
+) -> None:
+    state_dir, _ = hermetic_focusflow_env
+    store = SessionStore(state_dir=str(state_dir))
+
+    # 2026-06-15 21:30:00 UTC-5 == 2026-06-16 02:30:00Z (crosses UTC midnight, same local day!)
+    tz_minus5 = datetime.timezone(datetime.timedelta(hours=-5))
+    local_start = datetime.datetime(2026, 6, 15, 21, 0, 0, tzinfo=tz_minus5)
+    local_now = datetime.datetime(2026, 6, 15, 21, 45, 0, tzinfo=tz_minus5)
+
+    store.finalize_session(
+        "tz-1",
+        "dev",
+        45,
+        completed=True,
+        blocked_count=2,
+        start_time=local_start,
+        end_time=local_now,
+    )
+    direct = store.compute_analytics(days=7, now=local_now)
+    exported = json.loads(store.export_json_string(days=7, now=local_now))
+    assert direct.today_focus_minutes == 45
+    assert exported["summary"]["today_focus_minutes"] == 45
+    assert exported["summary"]["daily"][-1]["date"] == "2026-06-15"
+
+    # Also verify default `now=None` uses local timezone consistently in both methods
+    today_local = datetime.datetime.now().astimezone().replace(hour=0, minute=5, second=0, microsecond=0)
+    store.finalize_session(
+        "tz-today",
+        "study",
+        25,
+        completed=True,
+        blocked_count=1,
+        start_time=today_local,
+        end_time=today_local + datetime.timedelta(minutes=25),
+    )
+    default_summary = store.compute_analytics(days=7)
+    default_export = json.loads(store.export_json_string(days=7))
+    assert default_export["summary"]["today_focus_minutes"] == default_summary.today_focus_minutes
+    assert default_export["summary"]["daily"][-1]["date"] == default_summary.daily[-1].date
+
+
+def test_gui_early_break_blocked_kpi_hardcore_break_and_token_regen(
+    hermetic_focusflow_env: tuple[Path, Path],
+    monkeypatch,
+) -> None:
+    import pytest
+
+    tk = pytest.importorskip("tkinter")
+    import FocusFlowGUI
+    from focusflow_core.config import load_config, save_config
+
+    state_dir, _ = hermetic_focusflow_env
+    cfg = load_config(state_dir=str(state_dir))
+    cfg.upsert_custom_profile("temp-custom", work_minutes=30, break_minutes=5, sites=["medium.com"])
+    save_config(cfg, state_dir=str(state_dir))
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+    except tk.TclError:
+        pytest.skip("Tkinter display unavailable in headless environment")
+
+    app = FocusFlowGUI.FocusFlowGUI(root)
+    try:
+        # 1. FrictionChallengeDialog regenerates fresh token & redraws Canvas on mismatch
+        dlg = FocusFlowGUI.FrictionChallengeDialog(root, reason_label="TEST REGEN")
+        try:
+            first_token = dlg.token
+            dlg.entry.insert(0, "WRONGCODE1234567")
+            dlg._on_submit()
+            assert dlg.passed is False
+            assert dlg.token != first_token
+            canvas_text = dlg.canvas.itemcget(dlg._token_text_id, "text").replace(" - ", "")
+            assert canvas_text == dlg.token
+        finally:
+            dlg.destroy()
+
+        # 2. Early manual break (`give_break`) finalizes WORK session (zero leaked "running" records)
+        #    and does NOT double-count DISTRACTIONS KILLED KPI!
+        monkeypatch.setattr(app, "_verify_friction_challenge", lambda reason="": True)
+        app.profile_var.set("study")
+        app.on_profile_change()
+        app.start_session()
+        app.session_blocked_count = 4
+        app.refresh_analytics_ui()
+        assert app.kpi_labels["blocked"].cget("text") == "4"
+
+        app.give_break()
+        assert app.pomo_state == "BREAK"
+        assert app.active_session_id == ""
+        assert app.session_blocked_count == 0
+        sessions_after_break = app.session_store.load_sessions()
+        assert len(sessions_after_break) == 1
+        assert sessions_after_break[0].status == "aborted"
+        assert sessions_after_break[0].completed is False
+        assert sessions_after_break[0].blocked_count == 4
+        # KPI must equal 4 (not doubled to 8!)
+        assert app.kpi_labels["blocked"].cget("text") == "4"
+
+        app.stop_session(verified=True)
+        assert app.kpi_labels["blocked"].cget("text") == "4"
+
+        # 3. Hardcore mode keeps hosts shield continuously engaged during Pomodoro break
+        app.profile_var.set("hardcore")
+        app.on_profile_change()
+        app.start_session()
+        assert app.hosts_engaged is True
+        monkeypatch.setattr(FocusFlowGUI.messagebox, "showinfo", lambda *a, **kw: None)
+        app._on_phase_expired()
+        assert app.pomo_state == "BREAK"
+        assert app.hosts_engaged is True
+        assert app.hosts_manager.is_active() is True
+        app.stop_session(verified=True)
+
+        # 4. External deletion of selected custom profile falls back cleanly to "study" on tab switch
+        app.profile_var.set("temp-custom")
+        app.on_profile_change()
+        assert app.current_profile == "temp-custom"
+
+        ext_cfg = load_config(state_dir=str(state_dir))
+        ext_cfg.delete_custom_profile("temp-custom")
+        save_config(ext_cfg, state_dir=str(state_dir))
+
+        app.notebook.select(app.tab_timer)
+        app._on_tab_changed(None)
+        assert app.current_profile == "study"
+        assert app.profile_var.get() == "study"
+    finally:
+        app.worker_running = False
+        try:
+            root.destroy()
+        except Exception:
+            pass
+

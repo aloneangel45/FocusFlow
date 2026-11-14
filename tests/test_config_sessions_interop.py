@@ -304,3 +304,65 @@ def test_go_and_python_full_state_interoperability(hermetic_focusflow_env: tuple
     assert status_go["daily_goal_minutes"] == py_goal.daily_goal_minutes == 200
     assert status_go["today_focus_minutes"] == py_goal.today_focus_minutes == 50
     assert status_go["daily_goal_progress_pct"] == py_goal.daily_goal_progress_pct == 25.0
+
+
+def test_utf8_bom_zero_byte_corrupt_backup_and_abort_active_sessions(
+    hermetic_focusflow_env: tuple[Path, Path],
+) -> None:
+    state_dir, _ = hermetic_focusflow_env
+    cfg_path = Path(get_config_path(str(state_dir)))
+
+    # 1. UTF-8 BOM in config.json + null fields in profile
+    bom_cfg = b'\xef\xbb\xbf{"daily_goal_minutes": 165, "custom_domains": ["https://reddit.com:443/r/python"], "profiles": {"custom1": {"name": null, "description": null, "default_work_minutes": null, "default_break_minutes": -3, "blocked_domains": ["x.com"]}}}\n'
+    cfg_path.write_bytes(bom_cfg)
+    cfg = load_config(state_dir=str(state_dir))
+    assert cfg.daily_goal_minutes == 165
+    assert cfg.custom_domains == ["reddit.com"]
+    assert cfg.profiles["custom1"].default_work_minutes == 25
+    assert cfg.profiles["custom1"].default_break_minutes == 5
+
+    # 2. 0-byte config.json self-heals without .corrupt.bak
+    cfg_path.write_bytes(b"")
+    cfg_empty = load_config(state_dir=str(state_dir))
+    assert cfg_empty.daily_goal_minutes == 120
+    assert not Path(f"{cfg_path}.corrupt.bak").exists()
+
+    # 3. Corrupted config.json backs up to config.json.corrupt.bak and self-heals
+    corrupt_cfg = b'{"daily_goal_minutes": 90, "profiles": [BROKEN'
+    cfg_path.write_bytes(corrupt_cfg)
+    cfg_healed = load_config(state_dir=str(state_dir))
+    assert cfg_healed.daily_goal_minutes == 120
+    assert Path(f"{cfg_path}.corrupt.bak").read_bytes() == corrupt_cfg
+
+    # 4. UTF-8 BOM + null fields in sessions.json preserves history
+    store = SessionStore(state_dir=str(state_dir))
+    sess_path = Path(store.path)
+    bom_sess = b'\xef\xbb\xbf{"sessions": [{"id": "s-bom", "profile": null, "start_time": "2026-06-15T10:00:00Z", "duration_minutes": null, "completed": true, "blocked_count": null}]}\n'
+    sess_path.write_bytes(bom_sess)
+    loaded = store.load_sessions()
+    assert len(loaded) == 1
+    assert loaded[0].id == "s-bom"
+    assert loaded[0].profile == "study"
+    assert loaded[0].duration_minutes == 0
+    assert loaded[0].blocked_count == 0
+
+    t0 = datetime.datetime(2026, 6, 15, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    store.start_session("s-run", "dev", 50, start_time=t0)
+    assert len(store.load_sessions()) == 2
+    assert store.is_session_running("s-run") is True
+
+    # 5. abort_active_sessions finalizes running record and blocks late completed overwrite
+    aborted = store.abort_active_sessions(now=t0 + datetime.timedelta(minutes=14, seconds=20))
+    assert aborted == 1
+    assert store.is_session_running("s-run") is False
+    store.finalize_session("s-run", "dev", 50, completed=True, status="completed", start_time=t0, end_time=t0 + datetime.timedelta(minutes=50))
+    by_id = {r.id: r for r in store.load_sessions()}
+    assert by_id["s-run"].completed is False
+    assert by_id["s-run"].status == "aborted"
+    assert by_id["s-run"].duration_minutes == 14
+
+    # 6. Corrupted sessions.json backs up to sessions.json.corrupt.bak and self-heals
+    corrupt_sess = b'{"sessions": [{"id": "truncated"'
+    sess_path.write_bytes(corrupt_sess)
+    assert store.load_sessions() == []
+    assert Path(f"{sess_path}.corrupt.bak").read_bytes() == corrupt_sess

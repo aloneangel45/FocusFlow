@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -338,6 +339,7 @@ func (h *HostsManager) LoadJournal() (*HostsJournal, error) {
 	if err != nil {
 		return nil, err
 	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
 	var j HostsJournal
 	if err := json.Unmarshal(raw, &j); err != nil {
 		return nil, err

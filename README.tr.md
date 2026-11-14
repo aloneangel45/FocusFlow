@@ -53,7 +53,7 @@ python FocusFlowGUI.py --elevate
 ### 3. Komut Satiri Araci (Go CLI)
 Kaynak koddan derleme:
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.0" -o focusflow.exe ./cmd/focusflow
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.1" -o focusflow.exe ./cmd/focusflow
 ```
 
 Temel komutlar:

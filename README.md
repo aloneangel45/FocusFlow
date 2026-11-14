@@ -77,7 +77,7 @@ curl -fsSL https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install
 ```powershell
 irm https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.ps1 | iex
 ```
-Both installers download `checksums.txt` from GitHub Releases and verify the archive SHA-256 digest prior to extraction. Pin a specific release with `FOCUSFLOW_VERSION=v2.2.0`.
+Both installers download `checksums.txt` from GitHub Releases and verify the archive SHA-256 digest prior to extraction. Pin a specific release with `FOCUSFLOW_VERSION=v2.2.1`.
 
 ### 2. Desktop HUD (Python 3.10+, Zero Required Packages)
 Launch `Launch_FocusFlow_GUI.bat` on Windows or run directly:
@@ -92,7 +92,7 @@ python FocusFlowGUI.py --elevate
 
 ### 3. Build Native Standalone CLI from Source (Go 1.23+)
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.0" -o focusflow ./cmd/focusflow
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.1" -o focusflow ./cmd/focusflow
 ```
 
 ---

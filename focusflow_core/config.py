@@ -87,17 +87,43 @@ class FocusProfile:
 
     @classmethod
     def from_dict(cls, key: str, data: dict[str, object]) -> "FocusProfile":
-        raw_domains = data.get("blocked_domains") or []
-        raw_procs = data.get("blocked_processes") or []
-        work_min = int(data.get("default_work_minutes", 25))
-        break_min = int(data.get("default_break_minutes", 5))
+        raw_domains = data.get("blocked_domains")
+        raw_procs = data.get("blocked_processes")
+        domains_list = [str(x) for x in raw_domains if x is not None] if isinstance(raw_domains, (list, tuple)) else []
+        procs_list = [str(x) for x in raw_procs if x is not None] if isinstance(raw_procs, (list, tuple)) else []
+
+        raw_work = data.get("default_work_minutes", 25)
+        try:
+            work_min = int(raw_work) if raw_work is not None and not isinstance(raw_work, bool) else 25
+        except (TypeError, ValueError):
+            work_min = 25
+        if work_min < 1:
+            work_min = 25
+        elif work_min > 720:
+            work_min = 720
+
+        raw_break = data.get("default_break_minutes", 5)
+        try:
+            break_min = int(raw_break) if raw_break is not None and not isinstance(raw_break, bool) else 5
+        except (TypeError, ValueError):
+            break_min = 5
+        if break_min < 0:
+            break_min = 5
+        elif break_min > 120:
+            break_min = 120
+
+        raw_name = data.get("name")
+        clean_name = str(raw_name).strip().lower() if raw_name is not None else ""
+        raw_desc = data.get("description")
+        clean_desc = str(raw_desc) if raw_desc is not None else ""
+
         return cls(
-            name=str(data.get("name") or key).strip().lower() or key,
-            description=str(data.get("description") or ""),
-            blocked_domains=sanitize_domains([str(x) for x in raw_domains]),
-            blocked_processes=_sanitize_process_list([str(x) for x in raw_procs]),
-            default_work_minutes=work_min if work_min > 0 else 25,
-            default_break_minutes=break_min if break_min >= 0 else 5,
+            name=clean_name or key,
+            description=clean_desc,
+            blocked_domains=sanitize_domains(domains_list),
+            blocked_processes=_sanitize_process_list(procs_list),
+            default_work_minutes=work_min,
+            default_break_minutes=break_min,
         )
 
 
@@ -334,28 +360,61 @@ def save_config(cfg: ConfigStore, state_dir: str | None = None) -> None:
         raise
 
 
+def _backup_corrupted_config(path: str, raw_bytes: bytes) -> None:
+    if not raw_bytes:
+        return
+    bak_path = f"{path}.corrupt.bak"
+    try:
+        with open(bak_path, "wb") as f:
+            f.write(raw_bytes)
+    except OSError:
+        pass
+
+
 def load_config(state_dir: str | None = None) -> ConfigStore:
     resolved_dir = state_dir or get_state_dir()
     cfg_path = get_config_path(resolved_dir)
 
-    if not os.path.exists(cfg_path):
-        cfg = ConfigStore(
+    def _init_default() -> ConfigStore:
+        cfg_default = ConfigStore(
             custom_domains=[],
             custom_processes=[],
             profiles=default_profiles(),
             daily_goal_minutes=DEFAULT_DAILY_GOAL_MINUTES,
         )
-        save_config(cfg, state_dir=resolved_dir)
-        return cfg
+        save_config(cfg_default, state_dir=resolved_dir)
+        return cfg_default
 
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    if not os.path.exists(cfg_path):
+        return _init_default()
+
+    with open(cfg_path, "rb") as f:
+        raw_bytes = f.read()
+
+    clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
+    if not clean_bytes.strip():
+        return _init_default()
+
+    try:
+        raw = json.loads(clean_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _backup_corrupted_config(cfg_path, raw_bytes)
+        return _init_default()
 
     if not isinstance(raw, dict):
-        raise ValueError("invalid config.json root object")
+        _backup_corrupted_config(cfg_path, raw_bytes)
+        return _init_default()
 
-    raw_domains = list(raw.get("custom_domains") or []) + list(raw.get("custom_sites") or [])
-    raw_procs = list(raw.get("custom_processes") or []) + list(raw.get("custom_apps") or [])
+    cd = raw.get("custom_domains")
+    cs = raw.get("custom_sites")
+    cp = raw.get("custom_processes")
+    ca = raw.get("custom_apps")
+    raw_domains = (list(cd) if isinstance(cd, (list, tuple)) else []) + (
+        list(cs) if isinstance(cs, (list, tuple)) else []
+    )
+    raw_procs = (list(cp) if isinstance(cp, (list, tuple)) else []) + (
+        list(ca) if isinstance(ca, (list, tuple)) else []
+    )
     daily_goal = normalize_daily_goal_minutes(raw.get("daily_goal_minutes"))
 
     profiles_map: dict[str, FocusProfile] = {}
@@ -372,8 +431,8 @@ def load_config(state_dir: str | None = None) -> ConfigStore:
             profiles_map[key] = default_prof
 
     return ConfigStore(
-        custom_domains=sanitize_domains([str(x) for x in raw_domains]),
-        custom_processes=_sanitize_process_list([str(x) for x in raw_procs]),
+        custom_domains=sanitize_domains([str(x) for x in raw_domains if x is not None]),
+        custom_processes=_sanitize_process_list([str(x) for x in raw_procs if x is not None]),
         profiles=profiles_map,
         daily_goal_minutes=daily_goal,
     )

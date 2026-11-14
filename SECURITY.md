@@ -4,9 +4,9 @@
 
 | Version | Status               |
 | :------ | :------------------- |
-| 2.1.x   | Supported            |
-| 2.0.x   | Critical fixes only  |
-| < 2.0   | Unsupported          |
+| 2.2.x   | Supported            |
+| 2.1.x   | Security fixes only  |
+| < 2.1   | Unsupported          |
 
 ## Security Architecture Notes
 

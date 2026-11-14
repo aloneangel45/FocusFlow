@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.sh | sh
 # Optional environment variables:
-#   FOCUSFLOW_VERSION     Release tag to install (e.g. "v2.2.0" or "latest", default: "latest")
+#   FOCUSFLOW_VERSION     Release tag to install (e.g. "v2.2.1" or "latest", default: "latest")
 #   FOCUSFLOW_INSTALL_DIR Target directory for the focusflow binary
 #   FOCUSFLOW_REPO        GitHub owner/repo (default: "aloneangel45/FocusFlow")
 #   FOCUSFLOW_BASE_URL    Override release download base URL (for mirrors/testing)
@@ -89,10 +89,12 @@ resolve_base_url() {
         printf '%s' "${FOCUSFLOW_BASE_URL%/}"
         return
     fi
-    if [ "$VERSION" = "latest" ]; then
+    trimmed_ver="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+    lower_ver="$(printf '%s' "$trimmed_ver" | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$trimmed_ver" ] || [ "$lower_ver" = "latest" ]; then
         printf 'https://github.com/%s/releases/latest/download' "$REPO"
     else
-        clean_ver="${VERSION#v}"
+        clean_ver="${trimmed_ver#[vV]}"
         printf 'https://github.com/%s/releases/download/v%s' "$REPO" "$clean_ver"
     fi
 }
@@ -131,12 +133,19 @@ main() {
     download_file "${BASE_URL}/checksums.txt" "$CHECKSUMS_PATH"
 
     EXPECTED_HASH="$(awk -v asset="$ARCHIVE_NAME" '
+        {
+            sub(/^\357\273\277/, "", $0)
+            sub(/\r$/, "", $0)
+        }
         NF >= 2 {
             fname = $2
             sub(/^\*/, "", fname)
             if (fname == asset) {
-                print tolower($1)
-                exit
+                hash = tolower($1)
+                if (hash ~ /^[0-9a-f]+$/ && length(hash) == 64) {
+                    print hash
+                    exit
+                }
             }
         }
     ' "$CHECKSUMS_PATH")"

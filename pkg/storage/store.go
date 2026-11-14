@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
@@ -149,10 +150,48 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+func stripUTF8BOM(raw []byte) []byte {
+	return bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+}
+
+func backupCorruptStateFile(path string, raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	_ = os.WriteFile(path+".corrupt.bak", raw, 0644)
+}
+
+func parseSessionTimestampUTC(ts string) (time.Time, bool) {
+	ts = strings.TrimSpace(ts)
+	if ts == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 func (s *Store) readLocked() MetricsStore {
 	var data MetricsStore
-	if raw, err := os.ReadFile(s.path); err == nil && len(raw) > 0 {
-		_ = json.Unmarshal(raw, &data)
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		data.Sessions = []SessionRecord{}
+		return data
+	}
+	clean := stripUTF8BOM(raw)
+	trimmed := bytes.TrimSpace(clean)
+	if len(trimmed) == 0 {
+		data.Sessions = []SessionRecord{}
+		return data
+	}
+	if trimmed[0] != '{' || json.Unmarshal(trimmed, &data) != nil {
+		backupCorruptStateFile(s.path, raw)
+		data.Sessions = []SessionRecord{}
+		_ = s.writeLocked(data)
+		return data
 	}
 	if data.Sessions == nil {
 		data.Sessions = []SessionRecord{}
@@ -243,6 +282,10 @@ func (s *Store) FinalizeSession(sessionID, profile string, durationMin int, comp
 	if sessionID != "" {
 		for i := len(data.Sessions) - 1; i >= 0; i-- {
 			if data.Sessions[i].ID == sessionID {
+				// Never overwrite an externally stopped/orphaned session into completed=true
+				if completed && (data.Sessions[i].Status == "aborted" || data.Sessions[i].Status == "orphaned") {
+					return nil
+				}
 				data.Sessions[i].DurationMinutes = durationMin
 				data.Sessions[i].Completed = completed
 				data.Sessions[i].Status = status
@@ -284,6 +327,63 @@ func (s *Store) RecordSession(profile string, durationMin int, completed bool, b
 		status = "completed"
 	}
 	return s.FinalizeSession(GenerateSessionID(), profile, durationMin, completed, status, blockedCount, start, now)
+}
+
+// AbortActiveSessions transitions any active "running" sessions (and sessionID if supplied)
+// to status="aborted", completed=false, recording actual elapsed minutes up to now.
+func (s *Store) AbortActiveSessions(sessionID string, now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nowUTC := now.UTC()
+	data := s.readLocked()
+	aborted := 0
+	for i := range data.Sessions {
+		rec := &data.Sessions[i]
+		matchesID := sessionID != "" && rec.ID == sessionID
+		if rec.Status == "running" || (matchesID && rec.Status == "" && !rec.Completed) {
+			rec.Completed = false
+			rec.Status = "aborted"
+			if rec.EndTime == "" {
+				rec.EndTime = nowUTC.Format(time.RFC3339)
+			}
+			if rec.DurationMinutes <= 0 {
+				if startUTC, ok := parseSessionTimestampUTC(rec.StartTime); ok && nowUTC.After(startUTC) {
+					elapsed := int(nowUTC.Sub(startUTC).Minutes())
+					if rec.PlannedMinutes > 0 && elapsed > rec.PlannedMinutes {
+						elapsed = rec.PlannedMinutes
+					}
+					if elapsed > 0 {
+						rec.DurationMinutes = elapsed
+					}
+				}
+			}
+			aborted++
+		}
+	}
+	if aborted > 0 {
+		if err := s.writeLocked(data); err != nil {
+			return 0, err
+		}
+	}
+	return aborted, nil
+}
+
+// IsSessionRunning reports whether sessionID currently exists in sessions.json with status == "running".
+func (s *Store) IsSessionRunning(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data := s.readLocked()
+	for i := len(data.Sessions) - 1; i >= 0; i-- {
+		if data.Sessions[i].ID == sessionID {
+			return data.Sessions[i].Status == "running"
+		}
+	}
+	return false
 }
 
 // MarkOrphanedSession marks an orphaned session (by sessionID, plus any stale "running" records when sessionID matches or is empty) as completed: false.
@@ -360,13 +460,17 @@ func parseSessionLocalDate(ts string, loc *time.Location) (string, bool) {
 func (s *Store) readConfiguredDailyGoal() int {
 	cfgPath := filepath.Join(filepath.Dir(s.path), "config.json")
 	raw, err := os.ReadFile(cfgPath)
-	if err != nil || len(raw) == 0 {
+	if err != nil {
+		return DefaultDailyGoalMinutes
+	}
+	clean := bytes.TrimSpace(stripUTF8BOM(raw))
+	if len(clean) == 0 || clean[0] != '{' {
 		return DefaultDailyGoalMinutes
 	}
 	var partial struct {
 		DailyGoalMinutes int `json:"daily_goal_minutes"`
 	}
-	if err := json.Unmarshal(raw, &partial); err != nil {
+	if err := json.Unmarshal(clean, &partial); err != nil {
 		return DefaultDailyGoalMinutes
 	}
 	return NormalizeDailyGoalMinutes(partial.DailyGoalMinutes)

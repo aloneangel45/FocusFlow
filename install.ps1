@@ -104,15 +104,25 @@ function Install-FocusFlow {
 
         $checksumsText = Get-Content -Path $checksumsPath -Raw -Encoding UTF8
         $expectedHash = Get-ExpectedSha256 -ChecksumsContent $checksumsText -AssetName $archiveName
-        $actualHash = (Get-FileHash -Path $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sha256Hasher = [System.Security.Cryptography.SHA256]::Create()
+        $archiveStream = [System.IO.File]::OpenRead($archivePath)
+        try {
+            $actualHash = [System.BitConverter]::ToString($sha256Hasher.ComputeHash($archiveStream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $archiveStream.Dispose()
+            $sha256Hasher.Dispose()
+        }
 
         if ($actualHash -ne $expectedHash) {
             throw "[ERR] SHA-256 checksum verification FAILED for $archiveName! Expected: $expectedHash, Actual: $actualHash"
         }
         Write-Ok "Verified SHA-256: $actualHash"
 
-        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
-        Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        if (Test-Path -LiteralPath $extractDir) {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force
+        }
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $extractDir)
 
         $extractedExe = Join-Path $extractDir $innerExe
         if (-not (Test-Path -LiteralPath $extractedExe)) {

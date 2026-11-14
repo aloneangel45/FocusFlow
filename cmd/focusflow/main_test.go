@@ -169,8 +169,9 @@ func TestCLI_DailyGoalStatusAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	now := time.Now().UTC()
-	if err := store.FinalizeSession("g-1", "dev", 50, true, "completed", 2, now.Add(-50*time.Minute), now); err != nil {
+	localNow := time.Now()
+	todayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, localNow.Location())
+	if err := store.FinalizeSession("g-1", "dev", 50, true, "completed", 2, todayStart, localNow); err != nil {
 		t.Fatalf("FinalizeSession: %v", err)
 	}
 

@@ -116,6 +116,8 @@ def test_zero_emoji_and_zero_shortcode_across_code_and_docs() -> None:
         "FocusFlowGUI.py",
         "cmd/focusflow/main.go",
         "pkg/tui/hud.go",
+        "install.sh",
+        "install.ps1",
         "README.md",
         "README.tr.md",
         "SECURITY.md",
@@ -152,6 +154,20 @@ def test_gui_profile_switching_strict_close_and_single_prompt_unlock(
 
     tk = pytest.importorskip("tkinter")
     import FocusFlowGUI
+    from focusflow_core.config import load_config, save_config
+
+    state_dir, _ = hermetic_focusflow_env
+    pre_cfg = load_config(state_dir=str(state_dir))
+    pre_cfg.daily_goal_minutes = 150
+    pre_cfg.upsert_custom_profile(
+        "writer",
+        work_minutes=45,
+        break_minutes=10,
+        sites=["medium.com"],
+        apps=["slack.exe"],
+        description="Custom writing profile",
+    )
+    save_config(pre_cfg, state_dir=str(state_dir))
 
     try:
         root = tk.Tk()
@@ -161,6 +177,16 @@ def test_gui_profile_switching_strict_close_and_single_prompt_unlock(
 
     app = FocusFlowGUI.FocusFlowGUI(root)
     try:
+        # 0. Custom profile from config.json is dynamically loaded and selectable in GUI
+        assert "writer" in app.config_store.profiles
+        assert app.profile_combo is not None
+        app.profile_var.set("writer")
+        app.on_profile_change()
+        assert app.current_profile == "writer"
+        assert app.gui_prefs["pomo_work"] == 45
+        assert app.gui_prefs["pomo_break"] == 10
+        assert "medium.com" in app.active_profile_obj.blocked_domains
+        assert "Today: 0 / 150 min [0%]" in app.lbl_mini_goal.cget("text")
         # 1. Profile switching dynamically updates intervals, rules, and strictness
         app.profile_var.set("dev")
         app.on_profile_change()

@@ -1,5 +1,5 @@
 """
-FocusFlow v2.1.0 - Native Desktop Deep Work & Distraction Shield HUD
+FocusFlow v2.2.0 - Native Desktop Deep Work & Distraction Shield HUD
 Theme: Catppuccin Mocha Minimal Systems Architecture (Zero-Emoji)
 High-DPI Per-Monitor v2, Crash-Safe SHA-256 Hosts Engine, Win32 Toolhelp32 Supervisor
 """
@@ -37,6 +37,7 @@ from focusflow_core import (
     is_elevated,
     load_config,
     load_or_default,
+    normalize_daily_goal_minutes,
     normalize_process_name,
     sanitize_domain,
     save_config,
@@ -319,8 +320,9 @@ class FocusFlowGUI:
         self.current_mode = str(self.gui_prefs.get("mode", "pomodoro"))
         if self.current_mode not in ("pomodoro", "standard", "flex"):
             self.current_mode = "pomodoro"
-        self.current_profile = str(self.gui_prefs.get("profile", "study"))
-        if self.current_profile not in ("study", "dev", "hardcore"):
+        self.current_profile = str(self.gui_prefs.get("profile", "study")).strip().lower()
+        valid_profiles = set(self.config_store.profiles.keys()) | {"study", "dev", "hardcore"}
+        if self.current_profile not in valid_profiles:
             self.current_profile = "study"
 
     def save_gui_prefs(self) -> None:
@@ -395,6 +397,19 @@ class FocusFlowGUI:
             foreground=THEME["text"],
             fieldbackground=THEME["surface0"],
             arrowcolor=THEME["text"],
+        )
+
+        style.configure(
+            "TCombobox",
+            background=THEME["surface0"],
+            foreground=THEME["text"],
+            fieldbackground=THEME["mantle"],
+            arrowcolor=THEME["text"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", THEME["mantle"]), ("disabled", THEME["surface0"])],
+            foreground=[("readonly", THEME["text"]), ("disabled", THEME["subtext"])],
         )
 
     def build_ui(self) -> None:
@@ -492,6 +507,9 @@ class FocusFlowGUI:
         selected = self.notebook.select()
         if selected == str(self.tab_stats):
             self.refresh_analytics_ui()
+        elif selected == str(self.tab_timer) and not self.is_active:
+            self.config_store = load_config(state_dir=self.state_dir)
+            self.refresh_profile_selector()
 
     # ---------------- TAB 1: FOCUS HUD ----------------
     def build_tab_timer(self) -> None:
@@ -642,26 +660,11 @@ class FocusFlowGUI:
 
         self.profile_var = tk.StringVar(value=self.current_profile)
         self.profile_radios: list[tk.Radiobutton] = []
-        for p_val, p_lbl in (
-            ("study", "STUDY  [25/5m - Full Academic]"),
-            ("dev", "DEV    [50/10m - Docs Open]"),
-            ("hardcore", "AEGIS  [Hardcore Anti-Cheat]"),
-        ):
-            rb = tk.Radiobutton(
-                profile_card,
-                text=p_lbl,
-                value=p_val,
-                variable=self.profile_var,
-                command=self.on_profile_change,
-                font=("Consolas", 9, "bold"),
-                fg=THEME["text"],
-                bg=THEME["surface0"],
-                selectcolor=THEME["mantle"],
-                activebackground=THEME["surface0"],
-                activeforeground=THEME["sapphire"],
-            )
-            rb.pack(anchor="w", pady=2)
-            self.profile_radios.append(rb)
+        self.profile_radios_frame = tk.Frame(profile_card, bg=THEME["surface0"])
+        self.profile_radios_frame.pack(fill="x")
+        self.profile_combo_frame = tk.Frame(profile_card, bg=THEME["surface0"])
+        self.profile_combo: ttk.Combobox | None = None
+        self.refresh_profile_selector()
 
         stats_mini = tk.Frame(right_panel, bg=THEME["surface0"], padx=20, pady=14)
         stats_mini.pack(fill="x")
@@ -683,6 +686,15 @@ class FocusFlowGUI:
         )
         self.lbl_mini_profile_targets.pack(anchor="w", pady=2)
 
+        self.lbl_mini_goal = tk.Label(
+            stats_mini,
+            text="Today: 0 / 120 min [0%]",
+            font=("Segoe UI Semibold", 9),
+            fg=THEME["teal"],
+            bg=THEME["surface0"],
+        )
+        self.lbl_mini_goal.pack(anchor="w", pady=2)
+
         self.lbl_mini_blocked = tk.Label(
             stats_mini,
             text="Session Blocks: 0",
@@ -700,6 +712,75 @@ class FocusFlowGUI:
             bg=THEME["surface0"],
         )
         self.lbl_mini_cycles.pack(anchor="w", pady=2)
+
+    def _format_profile_radio_label(self, key: str) -> str:
+        builtin_labels = {
+            "study": "STUDY  [25/5m - Full Academic]",
+            "dev": "DEV    [50/10m - Docs Open]",
+            "hardcore": "AEGIS  [Hardcore Anti-Cheat]",
+        }
+        if key in builtin_labels:
+            return builtin_labels[key]
+        prof = self.config_store.profiles.get(key)
+        w = prof.default_work_minutes if prof else 25
+        b = prof.default_break_minutes if prof else 5
+        short = key.upper()[:8].ljust(6)
+        return f"{short} [{w}/{b}m - Custom]"
+
+    def refresh_profile_selector(self) -> None:
+        if not hasattr(self, "profile_radios_frame"):
+            return
+        for child in self.profile_radios_frame.winfo_children():
+            child.destroy()
+        for child in self.profile_combo_frame.winfo_children():
+            child.destroy()
+        self.profile_radios.clear()
+        self.profile_combo = None
+
+        all_names = self.config_store.sorted_profile_names()
+        radio_names = all_names if len(all_names) <= 5 else [n for n in ("study", "dev", "hardcore") if n in all_names]
+        rb_state = "disabled" if self.is_active else "normal"
+
+        for p_val in radio_names:
+            rb = tk.Radiobutton(
+                self.profile_radios_frame,
+                text=self._format_profile_radio_label(p_val),
+                value=p_val,
+                variable=self.profile_var,
+                command=self.on_profile_change,
+                font=("Consolas", 9, "bold"),
+                fg=THEME["text"],
+                bg=THEME["surface0"],
+                selectcolor=THEME["mantle"],
+                activebackground=THEME["surface0"],
+                activeforeground=THEME["sapphire"],
+                state=rb_state,
+            )
+            rb.pack(anchor="w", pady=2)
+            self.profile_radios.append(rb)
+
+        custom_names = [n for n in all_names if n not in ("study", "dev", "hardcore")]
+        if custom_names:
+            self.profile_combo_frame.pack(fill="x", pady=(6, 0))
+            tk.Label(
+                self.profile_combo_frame,
+                text="ALL / CUSTOM PROFILES:",
+                font=("Consolas", 8, "bold"),
+                fg=THEME["subtext"],
+                bg=THEME["surface0"],
+            ).pack(anchor="w", pady=(0, 2))
+            combo = ttk.Combobox(
+                self.profile_combo_frame,
+                textvariable=self.profile_var,
+                values=all_names,
+                state="disabled" if self.is_active else "readonly",
+                font=("Consolas", 9),
+            )
+            combo.pack(fill="x")
+            combo.bind("<<ComboboxSelected>>", lambda _e: self.on_profile_change())
+            self.profile_combo = combo
+        else:
+            self.profile_combo_frame.pack_forget()
 
     def _current_ratio(self) -> float:
         if self.is_active:
@@ -722,11 +803,15 @@ class FocusFlowGUI:
             self.profile_var.set(self.current_profile)
             return
 
+        self.config_store = load_config(state_dir=self.state_dir)
+        valid_profiles = set(self.config_store.profiles.keys()) | {"study", "dev", "hardcore"}
         selected = self.profile_var.get().strip().lower()
-        if selected not in ("study", "dev", "hardcore"):
+        if selected not in valid_profiles:
             selected = "study"
+            self.profile_var.set(selected)
         self.current_profile = selected
         self.gui_prefs["profile"] = selected
+        self.refresh_profile_selector()
 
         prof = load_or_default(selected, state_dir=self.state_dir)
         self.active_profile_obj = prof
@@ -982,7 +1067,7 @@ class FocusFlowGUI:
             return
         val, scope = self.tree_sites.item(sel[0], "values")
         if scope != "CUSTOM":
-            messagebox.showinfo("Profile Rule", f"'{val}' belongs to built-in profile '{self.current_profile}'. Switch profiles to change preset rules.")
+            messagebox.showinfo("Profile Rule", f"'{val}' belongs to profile '{self.current_profile}'. Switch profiles to change preset rules.")
             return
         cfg = load_config(state_dir=self.state_dir)
         if val in cfg.custom_domains:
@@ -1025,7 +1110,7 @@ class FocusFlowGUI:
             return
         val, scope = self.tree_apps.item(sel[0], "values")
         if scope != "CUSTOM":
-            messagebox.showinfo("Profile Rule", f"'{val}' belongs to built-in profile '{self.current_profile}'.")
+            messagebox.showinfo("Profile Rule", f"'{val}' belongs to profile '{self.current_profile}'.")
             return
         cfg = load_config(state_dir=self.state_dir)
         if val in cfg.custom_processes:
@@ -1139,6 +1224,10 @@ class FocusFlowGUI:
         streak_unit = "DAY" if summary.active_streak_days == 1 else "DAYS"
         self.lbl_streak_badge.config(text=f"STREAK: {summary.active_streak_days} {streak_unit}")
         self.lbl_mini_cycles.config(text=f"Completed Sprints: {summary.completed_sprints}")
+        if hasattr(self, "lbl_mini_goal"):
+            self.lbl_mini_goal.config(
+                text=f"Today: {summary.today_focus_minutes} / {summary.daily_goal_minutes} min [{summary.daily_goal_progress_pct:.0f}%]"
+            )
 
         if hasattr(self, "kpi_labels"):
             self.kpi_labels["hours"].config(text=f"{summary.total_hours:.1f}h ({summary.total_minutes}m)")
@@ -1425,6 +1514,17 @@ class FocusFlowGUI:
         self.spin_std.set(int(self.gui_prefs.get("standard_duration", 60)))
         self.spin_std.grid(row=2, column=1, sticky="w", padx=16)
 
+        tk.Label(
+            grid_f,
+            text="Daily Focus Goal (min):",
+            font=("Segoe UI", 10),
+            fg=THEME["text"],
+            bg=THEME["surface0"],
+        ).grid(row=3, column=0, sticky="w", pady=8)
+        self.spin_daily_goal = ttk.Spinbox(grid_f, from_=5, to=1440, width=10)
+        self.spin_daily_goal.set(int(self.config_store.daily_goal_minutes))
+        self.spin_daily_goal.grid(row=3, column=1, sticky="w", padx=16)
+
         self.strict_var = tk.BooleanVar(value=bool(self.gui_prefs.get("strict_mode", True)))
         tk.Checkbutton(
             card,
@@ -1500,13 +1600,22 @@ class FocusFlowGUI:
             p_work = max(1, int(self.spin_p_work.get()))
             p_break = max(1, int(self.spin_p_break.get()))
             std_dur = max(1, int(self.spin_std.get()))
+            daily_goal = normalize_daily_goal_minutes(int(self.spin_daily_goal.get()))
             self.gui_prefs["pomo_work"] = p_work
             self.gui_prefs["pomo_break"] = p_break
             self.gui_prefs["standard_duration"] = std_dur
             self.gui_prefs["strict_mode"] = True if self.current_profile == "hardcore" else bool(self.strict_var.get())
             self.save_gui_prefs()
+
+            cfg = load_config(state_dir=self.state_dir)
+            cfg.daily_goal_minutes = daily_goal
+            save_config(cfg, state_dir=self.state_dir)
+            self.config_store = cfg
+            self.spin_daily_goal.set(daily_goal)
+
             if not self.is_active:
                 self.on_mode_change()
+            self.refresh_analytics_ui()
             messagebox.showinfo("Saved", "Configuration updated.")
         except Exception as exc:
             messagebox.showerror("Invalid Input", f"Could not save settings:\n{exc}")
@@ -1516,6 +1625,8 @@ class FocusFlowGUI:
         rb_state = "disabled" if active else "normal"
         for rb in (*self.mode_radios, *self.profile_radios):
             rb.config(state=rb_state)
+        if getattr(self, "profile_combo", None) is not None:
+            self.profile_combo.config(state="disabled" if active else "readonly")
 
     def _verify_friction_challenge(self, reason: str = "STRICT SESSION UNLOCK") -> bool:
         dlg = FrictionChallengeDialog(self.root, reason_label=reason)

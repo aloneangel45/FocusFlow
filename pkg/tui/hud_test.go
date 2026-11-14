@@ -17,8 +17,8 @@ func containsEmoji(s string) bool {
 }
 
 func TestHUD_BannerProgressAndDailyChart_ZeroEmojis(t *testing.T) {
-	banner := FormatBanner("2.1.0")
-	if !strings.Contains(banner, "v2.1.0") {
+	banner := FormatBanner("2.2.0")
+	if !strings.Contains(banner, "v2.2.0") {
 		t.Errorf("expected version in banner")
 	}
 	if containsEmoji(banner) {
@@ -28,6 +28,21 @@ func TestHUD_BannerProgressAndDailyChart_ZeroEmojis(t *testing.T) {
 	prog := FormatProgress(300, 600, "dev", 4)
 	if !strings.Contains(prog, "50%") || !strings.Contains(prog, "05:00/10:00") || containsEmoji(prog) {
 		t.Errorf("unexpected progress string: %q", prog)
+	}
+
+	cycleProg := FormatCycleProgress(60, 120, "study", 2, 2, 4)
+	if !strings.Contains(cycleProg, "[CYCLE 2/4]") || !strings.Contains(cycleProg, "50%") || containsEmoji(cycleProg) {
+		t.Errorf("unexpected cycle progress string: %q", cycleProg)
+	}
+
+	breakProg := FormatBreakProgress(30, 60, 1, 3, false)
+	if !strings.Contains(breakProg, "[CYCLE 1/3]") || !strings.Contains(breakProg, "PAUSED [BREAK]") || containsEmoji(breakProg) {
+		t.Errorf("unexpected break progress string: %q", breakProg)
+	}
+
+	goalLine := FormatDailyGoalLine(90, 120, 75.0)
+	if goalLine != "Today: 90 / 120 min [75%]" || containsEmoji(goalLine) {
+		t.Errorf("unexpected daily goal line: %q", goalLine)
 	}
 
 	chart := FormatDailyChart([]storage.DailyStat{

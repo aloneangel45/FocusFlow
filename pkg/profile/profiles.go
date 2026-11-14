@@ -2,12 +2,37 @@ package profile
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
 	"github.com/aloneangel45/focusflow/pkg/storage"
+)
+
+const (
+	DefaultDailyGoalMinutes = storage.DefaultDailyGoalMinutes
+	MinDailyGoalMinutes     = storage.MinDailyGoalMinutes
+	MaxDailyGoalMinutes     = storage.MaxDailyGoalMinutes
+)
+
+var (
+	ErrInvalidProfileSlug  = errors.New("invalid profile slug (must match ^[a-z0-9][a-z0-9_-]{0,31}$)")
+	ErrBuiltInProfile      = errors.New("built-in profile cannot be overwritten or deleted")
+	ErrProfileNotFound     = errors.New("profile not found")
+	ErrInvalidWorkMinutes  = errors.New("work minutes must be between 1 and 720")
+	ErrInvalidBreakMinutes = errors.New("break minutes must be between 0 and 120")
+
+	profileSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	builtInProfileSet  = map[string]struct{}{
+		"study":    {},
+		"dev":      {},
+		"hardcore": {},
+	}
 )
 
 type FocusProfile struct {
@@ -20,17 +45,82 @@ type FocusProfile struct {
 }
 
 type ConfigStore struct {
-	CustomDomains   []string                 `json:"custom_domains"`
-	CustomProcesses []string                 `json:"custom_processes"`
-	Profiles        map[string]*FocusProfile `json:"profiles"`
+	CustomDomains    []string                 `json:"custom_domains"`
+	CustomProcesses  []string                 `json:"custom_processes"`
+	DailyGoalMinutes int                      `json:"daily_goal_minutes"`
+	Profiles         map[string]*FocusProfile `json:"profiles"`
 }
 
 type rawConfigCompat struct {
-	CustomDomains   []string                 `json:"custom_domains"`
-	CustomProcesses []string                 `json:"custom_processes"`
-	CustomSites     []string                 `json:"custom_sites"`
-	CustomApps      []string                 `json:"custom_apps"`
-	Profiles        map[string]*FocusProfile `json:"profiles"`
+	CustomDomains    []string                 `json:"custom_domains"`
+	CustomProcesses  []string                 `json:"custom_processes"`
+	CustomSites      []string                 `json:"custom_sites"`
+	CustomApps       []string                 `json:"custom_apps"`
+	DailyGoalMinutes int                      `json:"daily_goal_minutes"`
+	Profiles         map[string]*FocusProfile `json:"profiles"`
+}
+
+type CustomProfileInput struct {
+	Name         string
+	FromProfile  string
+	Description  *string
+	WorkMinutes  *int
+	BreakMinutes *int
+	Domains      *[]string
+	Processes    *[]string
+}
+
+func NormalizeDailyGoalMinutes(minutes int) int {
+	return storage.NormalizeDailyGoalMinutes(minutes)
+}
+
+func IsBuiltInProfile(name string) bool {
+	_, ok := builtInProfileSet[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+func ValidateProfileSlug(name string) (string, error) {
+	slug := strings.TrimSpace(name)
+	if !profileSlugPattern.MatchString(slug) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidProfileSlug, name)
+	}
+	return slug, nil
+}
+
+func ValidateAndSanitizeDomains(rawDomains []string) ([]string, error) {
+	cleaned := make([]string, 0, len(rawDomains))
+	for _, raw := range rawDomains {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		d, err := engine.SanitizeDomain(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid domain %q: %w", raw, err)
+		}
+		cleaned = append(cleaned, d)
+	}
+	return engine.SanitizeDomains(cleaned), nil
+}
+
+func ValidateAndSanitizeProcesses(rawProcs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(rawProcs))
+	out := make([]string, 0, len(rawProcs))
+	for _, raw := range rawProcs {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		norm, err := engine.NormalizeProcessName(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid process %q: %w", raw, err)
+		}
+		if _, exists := seen[norm]; !exists {
+			seen[norm] = struct{}{}
+			out = append(out, norm)
+		}
+	}
+	return out, nil
 }
 
 func GetConfigDir() string {
@@ -71,9 +161,10 @@ func LoadConfig() (*ConfigStore, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg := &ConfigStore{
-				CustomDomains:   []string{},
-				CustomProcesses: []string{},
-				Profiles:        DefaultProfiles(),
+				CustomDomains:    []string{},
+				CustomProcesses:  []string{},
+				DailyGoalMinutes: DefaultDailyGoalMinutes,
+				Profiles:         DefaultProfiles(),
 			}
 			_ = SaveConfig(cfg)
 			return cfg, nil
@@ -92,15 +183,35 @@ func LoadConfig() (*ConfigStore, error) {
 	mergedProcs := append([]string{}, compat.CustomProcesses...)
 	mergedProcs = append(mergedProcs, compat.CustomApps...)
 
-	cfg := &ConfigStore{
-		CustomDomains:   engine.SanitizeDomains(mergedDomains),
-		CustomProcesses: sanitizeProcessList(mergedProcs),
-		Profiles:        compat.Profiles,
+	normalizedProfiles := make(map[string]*FocusProfile)
+	for rawKey, p := range compat.Profiles {
+		if p == nil {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if key == "" {
+			continue
+		}
+		pCopy := *p
+		pCopy.Name = key
+		pCopy.BlockedDomains = engine.SanitizeDomains(p.BlockedDomains)
+		pCopy.BlockedProcesses = sanitizeProcessList(p.BlockedProcesses)
+		if pCopy.DefaultWorkMinutes <= 0 {
+			pCopy.DefaultWorkMinutes = 25
+		}
+		if pCopy.DefaultBreakMinutes < 0 {
+			pCopy.DefaultBreakMinutes = 5
+		}
+		normalizedProfiles[key] = &pCopy
 	}
 
-	if cfg.Profiles == nil {
-		cfg.Profiles = make(map[string]*FocusProfile)
+	cfg := &ConfigStore{
+		CustomDomains:    engine.SanitizeDomains(mergedDomains),
+		CustomProcesses:  sanitizeProcessList(mergedProcs),
+		DailyGoalMinutes: NormalizeDailyGoalMinutes(compat.DailyGoalMinutes),
+		Profiles:         normalizedProfiles,
 	}
+
 	if _, ok := cfg.Profiles["dev"]; !ok {
 		cfg.Profiles["dev"] = DevProfile()
 	}
@@ -109,17 +220,6 @@ func LoadConfig() (*ConfigStore, error) {
 	}
 	if _, ok := cfg.Profiles["hardcore"]; !ok {
 		cfg.Profiles["hardcore"] = HardcoreProfile()
-	}
-
-	for key, p := range cfg.Profiles {
-		if p == nil {
-			continue
-		}
-		if p.Name == "" {
-			p.Name = key
-		}
-		p.BlockedDomains = engine.SanitizeDomains(p.BlockedDomains)
-		p.BlockedProcesses = sanitizeProcessList(p.BlockedProcesses)
 	}
 
 	return cfg, nil
@@ -141,6 +241,7 @@ func SaveConfig(cfg *ConfigStore) error {
 	} else {
 		cfg.CustomProcesses = sanitizeProcessList(cfg.CustomProcesses)
 	}
+	cfg.DailyGoalMinutes = NormalizeDailyGoalMinutes(cfg.DailyGoalMinutes)
 	if cfg.Profiles == nil {
 		cfg.Profiles = DefaultProfiles()
 	}
@@ -242,13 +343,163 @@ func HardcoreProfile() *FocusProfile {
 	return p
 }
 
-func LoadOrDefault(name string) *FocusProfile {
+func resolveAlias(name string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	if lower == "coding" {
-		lower = "dev"
-	} else if lower == "lockdown" {
-		lower = "hardcore"
+		return "dev"
 	}
+	if lower == "lockdown" {
+		return "hardcore"
+	}
+	return lower
+}
+
+func (cfg *ConfigStore) SortedProfileNames() []string {
+	builtIns := []string{"study", "dev", "hardcore"}
+	out := make([]string, 0, len(cfg.Profiles))
+	for _, b := range builtIns {
+		if _, ok := cfg.Profiles[b]; ok {
+			out = append(out, b)
+		}
+	}
+	var custom []string
+	for k := range cfg.Profiles {
+		if !IsBuiltInProfile(k) {
+			custom = append(custom, k)
+		}
+	}
+	sort.Strings(custom)
+	out = append(out, custom...)
+	return out
+}
+
+func (cfg *ConfigStore) GetProfile(name string) (*FocusProfile, bool) {
+	if cfg == nil || cfg.Profiles == nil {
+		return nil, false
+	}
+	key := resolveAlias(name)
+	p, ok := cfg.Profiles[key]
+	if !ok || p == nil {
+		return nil, false
+	}
+	return p, true
+}
+
+func (cfg *ConfigStore) UpsertCustomProfile(in CustomProfileInput) (*FocusProfile, bool, error) {
+	slug, err := ValidateProfileSlug(in.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	if IsBuiltInProfile(slug) {
+		return nil, false, fmt.Errorf("%w: %s", ErrBuiltInProfile, slug)
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = DefaultProfiles()
+	}
+
+	existing, existed := cfg.Profiles[slug]
+	workMin := 25
+	breakMin := 5
+	desc := "Custom focus profile"
+	domains := []string{}
+	procs := []string{}
+
+	fromKey := resolveAlias(in.FromProfile)
+	if fromKey != "" {
+		src, ok := cfg.Profiles[fromKey]
+		if !ok || src == nil {
+			return nil, false, fmt.Errorf("source %w: %s", ErrProfileNotFound, in.FromProfile)
+		}
+		workMin = src.DefaultWorkMinutes
+		breakMin = src.DefaultBreakMinutes
+		desc = src.Description
+		domains = append([]string{}, src.BlockedDomains...)
+		procs = append([]string{}, src.BlockedProcesses...)
+	} else if existed && existing != nil {
+		workMin = existing.DefaultWorkMinutes
+		breakMin = existing.DefaultBreakMinutes
+		desc = existing.Description
+		domains = append([]string{}, existing.BlockedDomains...)
+		procs = append([]string{}, existing.BlockedProcesses...)
+	}
+
+	if in.WorkMinutes != nil {
+		if *in.WorkMinutes < 1 || *in.WorkMinutes > 720 {
+			return nil, false, ErrInvalidWorkMinutes
+		}
+		workMin = *in.WorkMinutes
+	}
+	if in.BreakMinutes != nil {
+		if *in.BreakMinutes < 0 || *in.BreakMinutes > 120 {
+			return nil, false, ErrInvalidBreakMinutes
+		}
+		breakMin = *in.BreakMinutes
+	}
+	if in.Description != nil {
+		trimmedDesc := strings.TrimSpace(*in.Description)
+		if trimmedDesc != "" {
+			desc = trimmedDesc
+		} else {
+			desc = "Custom focus profile"
+		}
+	}
+
+	if in.Domains != nil {
+		cleanDomains, err := ValidateAndSanitizeDomains(*in.Domains)
+		if err != nil {
+			return nil, false, err
+		}
+		if fromKey != "" {
+			domains = engine.SanitizeDomains(append(domains, cleanDomains...))
+		} else {
+			domains = cleanDomains
+		}
+	}
+
+	if in.Processes != nil {
+		cleanProcs, err := ValidateAndSanitizeProcesses(*in.Processes)
+		if err != nil {
+			return nil, false, err
+		}
+		if fromKey != "" {
+			procs = sanitizeProcessList(append(procs, cleanProcs...))
+		} else {
+			procs = cleanProcs
+		}
+	}
+
+	prof := &FocusProfile{
+		Name:                slug,
+		Description:         desc,
+		BlockedDomains:      domains,
+		BlockedProcesses:    procs,
+		DefaultWorkMinutes:  workMin,
+		DefaultBreakMinutes: breakMin,
+	}
+	cfg.Profiles[slug] = prof
+	return prof, !existed, nil
+}
+
+func (cfg *ConfigStore) DeleteCustomProfile(name string) error {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return ErrProfileNotFound
+	}
+	if IsBuiltInProfile(key) {
+		return fmt.Errorf("%w: %s", ErrBuiltInProfile, key)
+	}
+	if cfg.Profiles == nil {
+		return fmt.Errorf("%w: %s", ErrProfileNotFound, key)
+	}
+	if _, ok := cfg.Profiles[key]; !ok {
+		return fmt.Errorf("%w: %s", ErrProfileNotFound, key)
+	}
+	delete(cfg.Profiles, key)
+	return nil
+}
+
+func LoadOrDefault(name string) *FocusProfile {
+	lower := resolveAlias(name)
 
 	cfg, err := LoadConfig()
 	if err == nil {

@@ -12,8 +12,33 @@ import secrets
 import tempfile
 import threading
 
+from .config import (
+    DEFAULT_DAILY_GOAL_MINUTES,
+    normalize_daily_goal_minutes,
+)
 from .hosts import format_rfc3339_utc
-from .paths import get_sessions_path, get_state_dir
+from .paths import get_config_path, get_sessions_path, get_state_dir
+
+
+def calculate_daily_goal_progress_pct(today_minutes: int, daily_goal_minutes: int) -> float:
+    goal = normalize_daily_goal_minutes(daily_goal_minutes)
+    if today_minutes <= 0 or goal <= 0:
+        return 0.0
+    return round((today_minutes / goal) * 100.0, 2)
+
+
+@dataclasses.dataclass
+class DailyGoalProgress:
+    today_focus_minutes: int
+    daily_goal_minutes: int
+    daily_goal_progress_pct: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "today_focus_minutes": self.today_focus_minutes,
+            "daily_goal_minutes": self.daily_goal_minutes,
+            "daily_goal_progress_pct": round(self.daily_goal_progress_pct, 2),
+        }
 
 
 def generate_session_id() -> str:
@@ -85,6 +110,9 @@ class AnalyticsSummary:
     total_blocked: int
     active_streak_days: int
     daily: list[DailyStat]
+    today_focus_minutes: int = 0
+    daily_goal_minutes: int = DEFAULT_DAILY_GOAL_MINUTES
+    daily_goal_progress_pct: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -96,6 +124,9 @@ class AnalyticsSummary:
             "total_hours": round(self.total_hours, 2),
             "total_blocked": self.total_blocked,
             "active_streak_days": self.active_streak_days,
+            "today_focus_minutes": self.today_focus_minutes,
+            "daily_goal_minutes": self.daily_goal_minutes,
+            "daily_goal_progress_pct": round(self.daily_goal_progress_pct, 2),
             "daily": [d.to_dict() for d in self.daily],
         }
 
@@ -261,16 +292,47 @@ class SessionStore:
                 self._write_locked(sessions)
         return marked
 
+    def _read_configured_daily_goal(self) -> int:
+        cfg_path = get_config_path(self.state_dir)
+        if not os.path.exists(cfg_path):
+            return DEFAULT_DAILY_GOAL_MINUTES
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                return normalize_daily_goal_minutes(raw.get("daily_goal_minutes"))
+        except Exception:
+            pass
+        return DEFAULT_DAILY_GOAL_MINUTES
+
+    def compute_daily_goal_progress(
+        self,
+        daily_goal_minutes: int | None = None,
+        now: datetime.datetime | None = None,
+    ) -> DailyGoalProgress:
+        summary = self.compute_analytics(days=1, now=now, daily_goal_minutes=daily_goal_minutes)
+        return DailyGoalProgress(
+            today_focus_minutes=summary.today_focus_minutes,
+            daily_goal_minutes=summary.daily_goal_minutes,
+            daily_goal_progress_pct=summary.daily_goal_progress_pct,
+        )
+
     def compute_analytics(
         self,
         days: int = 7,
         now: datetime.datetime | None = None,
+        daily_goal_minutes: int | None = None,
     ) -> AnalyticsSummary:
-        """Compute genuine streak, total focus hours, completion rate, and N-day bar chart."""
+        """Compute genuine streak, total focus hours, daily goal progress, completion rate, and N-day bar chart."""
         window = days if days > 0 else 7
         ref_now = now or datetime.datetime.now().astimezone()
         tz = ref_now.tzinfo
         today = ref_now.date()
+
+        if daily_goal_minutes is None or daily_goal_minutes <= 0:
+            goal_minutes = self._read_configured_daily_goal()
+        else:
+            goal_minutes = normalize_daily_goal_minutes(daily_goal_minutes)
 
         sessions = self.load_sessions()
         daily_min: dict[str, int] = {}
@@ -328,6 +390,9 @@ class SessionStore:
                 )
             )
 
+        today_focus_minutes = daily_min.get(today_str, 0)
+        goal_progress_pct = calculate_daily_goal_progress_pct(today_focus_minutes, goal_minutes)
+
         return AnalyticsSummary(
             completed_sprints=completed_count,
             attempted_sprints=attempted_count,
@@ -338,6 +403,9 @@ class SessionStore:
             total_blocked=total_blocked,
             active_streak_days=streak,
             daily=daily,
+            today_focus_minutes=today_focus_minutes,
+            daily_goal_minutes=goal_minutes,
+            daily_goal_progress_pct=goal_progress_pct,
         )
 
     def export_json_string(

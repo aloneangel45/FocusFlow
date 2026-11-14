@@ -1,6 +1,6 @@
-"""FocusFlow v2.1.0 unified standard-library core engine."""
+"""FocusFlow v2.2.0 unified standard-library core engine."""
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 from .paths import (
     get_backup_path,
@@ -48,21 +48,32 @@ from .privileges import (
     shield_mode_label,
 )
 from .config import (
+    BUILTIN_PROFILE_NAMES,
+    DEFAULT_DAILY_GOAL_MINUTES,
+    MAX_DAILY_GOAL_MINUTES,
+    MIN_DAILY_GOAL_MINUTES,
     ConfigStore,
     FocusProfile,
     default_profiles,
     dev_profile,
     hardcore_profile,
+    is_builtin_profile,
     load_config,
     load_or_default,
+    normalize_daily_goal_minutes,
     save_config,
     study_profile,
+    validate_and_sanitize_domains,
+    validate_and_sanitize_processes,
+    validate_profile_slug,
 )
 from .storage import (
     AnalyticsSummary,
+    DailyGoalProgress,
     DailyStat,
     SessionRecord,
     SessionStore,
+    calculate_daily_goal_progress_pct,
     generate_session_id,
 )
 from .timer import (
@@ -107,19 +118,30 @@ __all__ = [
     "elevate_self",
     "flush_dns",
     "flush_dns_async",
+    "BUILTIN_PROFILE_NAMES",
+    "DEFAULT_DAILY_GOAL_MINUTES",
+    "MIN_DAILY_GOAL_MINUTES",
+    "MAX_DAILY_GOAL_MINUTES",
     "FocusProfile",
     "ConfigStore",
     "default_profiles",
     "study_profile",
     "dev_profile",
     "hardcore_profile",
+    "is_builtin_profile",
+    "validate_profile_slug",
+    "validate_and_sanitize_domains",
+    "validate_and_sanitize_processes",
+    "normalize_daily_goal_minutes",
     "load_config",
     "save_config",
     "load_or_default",
     "SessionRecord",
     "DailyStat",
+    "DailyGoalProgress",
     "AnalyticsSummary",
     "SessionStore",
+    "calculate_daily_goal_progress_pct",
     "generate_session_id",
     "MonotonicPhaseTimer",
     "generate_friction_token",

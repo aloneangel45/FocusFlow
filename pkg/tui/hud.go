@@ -9,7 +9,7 @@ import (
 	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
-const DefaultVersion = "2.1.0"
+const DefaultVersion = "2.2.0"
 
 func FormatBanner(version string) string {
 	if strings.TrimSpace(version) == "" {
@@ -38,7 +38,7 @@ func PrintBannerTo(w io.Writer, version string) {
 	_, _ = fmt.Fprint(w, FormatBanner(version))
 }
 
-func FormatProgress(elapsedSeconds, totalSeconds int, profileName string, blockedCount int) string {
+func buildBar(elapsedSeconds, totalSeconds, barWidth int) (string, int) {
 	percent := 0
 	if totalSeconds > 0 {
 		percent = (elapsedSeconds * 100) / totalSeconds
@@ -49,10 +49,13 @@ func FormatProgress(elapsedSeconds, totalSeconds int, profileName string, blocke
 	if percent > 100 {
 		percent = 100
 	}
-
-	barWidth := 30
 	filled := (barWidth * percent) / 100
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	return bar, percent
+}
+
+func FormatProgress(elapsedSeconds, totalSeconds int, profileName string, blockedCount int) string {
+	bar, percent := buildBar(elapsedSeconds, totalSeconds, 30)
 
 	elapsedMin := elapsedSeconds / 60
 	elapsedSec := elapsedSeconds % 60
@@ -61,6 +64,42 @@ func FormatProgress(elapsedSeconds, totalSeconds int, profileName string, blocke
 
 	return fmt.Sprintf("\r  [%02d:%02d/%02d:%02d] [%s] %3d%% | Profile: %-8s | Blocked: %d ",
 		elapsedMin, elapsedSec, totalMin, totalSec, bar, percent, profileName, blockedCount)
+}
+
+func FormatCycleProgress(elapsedSeconds, totalSeconds int, profileName string, blockedCount int, cycle, totalCycles int) string {
+	if totalCycles <= 1 {
+		return FormatProgress(elapsedSeconds, totalSeconds, profileName, blockedCount)
+	}
+	bar, percent := buildBar(elapsedSeconds, totalSeconds, 24)
+
+	elapsedMin := elapsedSeconds / 60
+	elapsedSec := elapsedSeconds % 60
+	totalMin := totalSeconds / 60
+	totalSec := totalSeconds % 60
+
+	return fmt.Sprintf("\r  [CYCLE %d/%d] [%02d:%02d/%02d:%02d] [%s] %3d%% | Profile: %-8s | Blocked: %d ",
+		cycle, totalCycles, elapsedMin, elapsedSec, totalMin, totalSec, bar, percent, profileName, blockedCount)
+}
+
+func FormatBreakProgress(elapsedSeconds, totalSeconds int, cycle, totalCycles int, continuousLockdown bool) string {
+	bar, percent := buildBar(elapsedSeconds, totalSeconds, 24)
+
+	elapsedMin := elapsedSeconds / 60
+	elapsedSec := elapsedSeconds % 60
+	totalMin := totalSeconds / 60
+	totalSec := totalSeconds % 60
+
+	shieldStatus := "PAUSED [BREAK]"
+	if continuousLockdown {
+		shieldStatus = "CONTINUOUS [HARDCORE]"
+	}
+
+	return fmt.Sprintf("\r  [CYCLE %d/%d] [BREAK %02d:%02d/%02d:%02d] [%s] %3d%% | Shield: %s ",
+		cycle, totalCycles, elapsedMin, elapsedSec, totalMin, totalSec, bar, percent, shieldStatus)
+}
+
+func FormatDailyGoalLine(todayMinutes, goalMinutes int, progressPct float64) string {
+	return fmt.Sprintf("Today: %d / %d min [%.0f%%]", todayMinutes, goalMinutes, progressPct)
 }
 
 func RenderProgress(elapsedSeconds, totalSeconds int, profileName string, blockedCount int) {

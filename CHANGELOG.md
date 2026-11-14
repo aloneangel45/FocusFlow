@@ -2,6 +2,16 @@
 
 All notable changes to FocusFlow are documented in this file.
 
+## [2.2.0] - 2026-11-14
+
+### Added
+- Custom Named Profiles (`focusflow profile list|show|create|delete [--json]`) with strict slug validation (`^[a-z0-9][a-z0-9_-]{0,31}$`), `--from` profile cloning, RFC-1123 domain sanitization, protected process denylist enforcement, and built-in profile deletion/overwrite guards across both Go (`pkg/profile`) and Python (`focusflow_core/config.py`).
+- Dynamic custom profile loading and selection in `FocusFlowGUI.py` (Catppuccin Mocha zero-emoji HUD) synchronized seamlessly with `ConfigStore.profiles`.
+- Daily Focus Goals (`daily_goal_minutes`, defaulting to `120` and clamped to `5..1440`) across Go and Python `config.json` stores, plus `focusflow goal [--minutes <N>] [--json]` CLI command and daily progress telemetry (`Today: X / Y min [Z%]`, `today_focus_minutes`, `daily_goal_minutes`, `daily_goal_progress_pct`) in `focusflow stats`, `focusflow status`, Python `SessionStore`, and the desktop HUD.
+- Multi-Cycle Pomodoro Sprint Engine (`focusflow start --cycles <N> --break <min>`) supporting 1..24 sequential work/break cycles, `[CYCLE k/N]` TUI progress indicators, immediate per-sprint `sessions.json` persistence, automatic `hosts` shield pause during recovery breaks (kept continuous under `--strict hardcore`), and clean `SIGINT`/`SIGTERM` rollback at any work or break phase.
+- Universal one-line installers `install.sh` (Linux and macOS `amd64`/`arm64`) and `install.ps1` (Windows `amd64`/`arm64`) with mandatory SHA-256 verification against `checksums.txt` before extraction.
+- Expanded Go (`pkg/profile`, `pkg/storage`, `pkg/tui`, `cmd/focusflow`) and Python (`pytest`) test suites covering Go <-> Python custom profile & daily goal interoperability, multi-cycle Pomodoro execution, signal rollback, and SHA-256 installer verification.
+
 ## [2.1.0] - 2026-11-10
 
 ### Added

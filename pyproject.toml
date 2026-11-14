@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "focusflow"
-version = "2.1.0"
+version = "2.2.0"
 description = "Crash-safe deep work discipline engine, dual-stack atomic hosts blocker, Win32 process supervisor, and Catppuccin Mocha desktop HUD."
 readme = "README.md"
 requires-python = ">=3.10"

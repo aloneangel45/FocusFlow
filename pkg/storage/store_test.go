@@ -66,6 +66,18 @@ func TestStore_LifecycleStreakAnalyticsAndExport(t *testing.T) {
 	if len(summary.Daily) != 7 {
 		t.Errorf("len(Daily) = %d, want 7", len(summary.Daily))
 	}
+	if summary.TodayFocusMinutes != 30 || summary.DailyGoalMinutes != 120 || summary.DailyGoalProgressPct != 25.0 {
+		t.Errorf("unexpected daily goal summary: today=%d goal=%d pct=%.2f",
+			summary.TodayFocusMinutes, summary.DailyGoalMinutes, summary.DailyGoalProgressPct)
+	}
+
+	goalProg, err := store.ComputeDailyGoalProgress(60, now)
+	if err != nil {
+		t.Fatalf("ComputeDailyGoalProgress: %v", err)
+	}
+	if goalProg.TodayFocusMinutes != 30 || goalProg.DailyGoalMinutes != 60 || goalProg.DailyGoalProgressPct != 50.0 {
+		t.Errorf("unexpected explicit goal progress: %+v", goalProg)
+	}
 
 	// JSON export
 	var jsonBuf bytes.Buffer

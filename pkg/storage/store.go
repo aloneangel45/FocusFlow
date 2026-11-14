@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +17,42 @@ import (
 	"sync"
 	"time"
 )
+
+const (
+	DefaultDailyGoalMinutes = 120
+	MinDailyGoalMinutes     = 5
+	MaxDailyGoalMinutes     = 1440
+)
+
+// NormalizeDailyGoalMinutes defaults omitted/non-positive values to 120 and clamps to 5..1440.
+func NormalizeDailyGoalMinutes(minutes int) int {
+	if minutes <= 0 {
+		return DefaultDailyGoalMinutes
+	}
+	if minutes < MinDailyGoalMinutes {
+		return MinDailyGoalMinutes
+	}
+	if minutes > MaxDailyGoalMinutes {
+		return MaxDailyGoalMinutes
+	}
+	return minutes
+}
+
+// CalculateDailyGoalProgressPct computes today's percentage progress toward dailyGoalMinutes rounded to 2 decimals.
+func CalculateDailyGoalProgressPct(todayMinutes, dailyGoalMinutes int) float64 {
+	goal := NormalizeDailyGoalMinutes(dailyGoalMinutes)
+	if todayMinutes <= 0 || goal <= 0 {
+		return 0.0
+	}
+	pct := (float64(todayMinutes) / float64(goal)) * 100.0
+	return math.Round(pct*100.0) / 100.0
+}
+
+type DailyGoalProgress struct {
+	TodayFocusMinutes    int     `json:"today_focus_minutes"`
+	DailyGoalMinutes     int     `json:"daily_goal_minutes"`
+	DailyGoalProgressPct float64 `json:"daily_goal_progress_pct"`
+}
 
 type SessionRecord struct {
 	ID              string `json:"id,omitempty"`
@@ -40,15 +77,18 @@ type DailyStat struct {
 }
 
 type AnalyticsSummary struct {
-	CompletedSprints int         `json:"completed_sprints"`
-	AttemptedSprints int         `json:"attempted_sprints"`
-	AbortedSprints   int         `json:"aborted_sprints"`
-	CompletionRate   float64     `json:"completion_rate"`
-	TotalMinutes     int         `json:"total_minutes"`
-	TotalHours       float64     `json:"total_hours"`
-	TotalBlocked     int         `json:"total_blocked"`
-	ActiveStreakDays int         `json:"active_streak_days"`
-	Daily            []DailyStat `json:"daily"`
+	CompletedSprints     int         `json:"completed_sprints"`
+	AttemptedSprints     int         `json:"attempted_sprints"`
+	AbortedSprints       int         `json:"aborted_sprints"`
+	CompletionRate       float64     `json:"completion_rate"`
+	TotalMinutes         int         `json:"total_minutes"`
+	TotalHours           float64     `json:"total_hours"`
+	TotalBlocked         int         `json:"total_blocked"`
+	ActiveStreakDays     int         `json:"active_streak_days"`
+	TodayFocusMinutes    int         `json:"today_focus_minutes"`
+	DailyGoalMinutes     int         `json:"daily_goal_minutes"`
+	DailyGoalProgressPct float64     `json:"daily_goal_progress_pct"`
+	Daily                []DailyStat `json:"daily"`
 }
 
 type ExportPayload struct {
@@ -317,11 +357,51 @@ func parseSessionLocalDate(ts string, loc *time.Location) (string, bool) {
 	return "", false
 }
 
-// ComputeAnalytics calculates real streak, completion rate, focus hours, and N-day chart from sessions.json.
+func (s *Store) readConfiguredDailyGoal() int {
+	cfgPath := filepath.Join(filepath.Dir(s.path), "config.json")
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil || len(raw) == 0 {
+		return DefaultDailyGoalMinutes
+	}
+	var partial struct {
+		DailyGoalMinutes int `json:"daily_goal_minutes"`
+	}
+	if err := json.Unmarshal(raw, &partial); err != nil {
+		return DefaultDailyGoalMinutes
+	}
+	return NormalizeDailyGoalMinutes(partial.DailyGoalMinutes)
+}
+
+// ComputeDailyGoalProgress calculates today's focus minutes and percentage toward the daily goal.
+func (s *Store) ComputeDailyGoalProgress(dailyGoalMinutes int, now time.Time) (DailyGoalProgress, error) {
+	summary, err := s.ComputeAnalyticsWithGoal(1, dailyGoalMinutes, now)
+	if err != nil {
+		return DailyGoalProgress{}, err
+	}
+	return DailyGoalProgress{
+		TodayFocusMinutes:    summary.TodayFocusMinutes,
+		DailyGoalMinutes:     summary.DailyGoalMinutes,
+		DailyGoalProgressPct: summary.DailyGoalProgressPct,
+	}, nil
+}
+
+// ComputeAnalytics calculates real streak, completion rate, focus hours, daily goal progress, and N-day chart from sessions.json.
 func (s *Store) ComputeAnalytics(days int, now time.Time) (*AnalyticsSummary, error) {
+	return s.ComputeAnalyticsWithGoal(days, 0, now)
+}
+
+// ComputeAnalyticsWithGoal calculates analytics using an explicit dailyGoalMinutes (or config.json default when <= 0).
+func (s *Store) ComputeAnalyticsWithGoal(days int, dailyGoalMinutes int, now time.Time) (*AnalyticsSummary, error) {
 	if days <= 0 {
 		days = 7
 	}
+	goalMinutes := dailyGoalMinutes
+	if goalMinutes <= 0 {
+		goalMinutes = s.readConfiguredDailyGoal()
+	} else {
+		goalMinutes = NormalizeDailyGoalMinutes(goalMinutes)
+	}
+
 	sessions, err := s.LoadSessions()
 	if err != nil {
 		return nil, err
@@ -394,16 +474,22 @@ func (s *Store) ComputeAnalytics(days int, now time.Time) (*AnalyticsSummary, er
 		})
 	}
 
+	todayFocusMinutes := dailyMin[todayStr]
+	goalPct := CalculateDailyGoalProgressPct(todayFocusMinutes, goalMinutes)
+
 	return &AnalyticsSummary{
-		CompletedSprints: completedCount,
-		AttemptedSprints: attemptedCount,
-		AbortedSprints:   abortedCount,
-		CompletionRate:   completionRate,
-		TotalMinutes:     totalMinutes,
-		TotalHours:       float64(totalMinutes) / 60.0,
-		TotalBlocked:     totalBlocked,
-		ActiveStreakDays: streak,
-		Daily:            daily,
+		CompletedSprints:     completedCount,
+		AttemptedSprints:     attemptedCount,
+		AbortedSprints:       abortedCount,
+		CompletionRate:       completionRate,
+		TotalMinutes:         totalMinutes,
+		TotalHours:           float64(totalMinutes) / 60.0,
+		TotalBlocked:         totalBlocked,
+		ActiveStreakDays:     streak,
+		TodayFocusMinutes:    todayFocusMinutes,
+		DailyGoalMinutes:     goalMinutes,
+		DailyGoalProgressPct: goalPct,
+		Daily:                daily,
 	}, nil
 }
 

@@ -51,7 +51,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="2.1.0"
+            VERSION="2.2.0"
           fi
           LDFLAGS="-s -w -X main.Version=${VERSION}"
 

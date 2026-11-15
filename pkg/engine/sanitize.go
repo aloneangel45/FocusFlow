@@ -68,6 +68,20 @@ var protectedBaseNames = []string{
 	"systemd",
 	"launchd",
 	"kernel_task",
+	"sh",
+	"bash",
+	"zsh",
+	"dash",
+	"fish",
+	"sshd",
+	"sudo",
+	"login",
+	"dbus-daemon",
+	"gnome-shell",
+	"plasmashell",
+	"xorg",
+	"xwayland",
+	"windowserver",
 }
 
 var protectedProcessMap = func() map[string]struct{} {

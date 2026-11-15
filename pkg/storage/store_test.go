@@ -198,3 +198,13 @@ func TestStore_AbortActiveSessionsAndNoCompletedOverwrite(t *testing.T) {
 		t.Fatalf("expected aborted 11m record preserved, got %+v", sessions[0])
 	}
 }
+
+func TestLookupPasswdHome_SudoUserResolution(t *testing.T) {
+	sample := "# comment\nroot:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000:Alice:/home/alice:/bin/zsh\n"
+	if got := lookupPasswdHome(sample, "alice"); got != "/home/alice" {
+		t.Fatalf("lookupPasswdHome(alice) = %q, want /home/alice", got)
+	}
+	if got := lookupPasswdHome(sample, "missing"); got != "" {
+		t.Fatalf("lookupPasswdHome(missing) = %q, want empty", got)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
 	"github.com/aloneangel45/focusflow/pkg/storage"
@@ -166,28 +167,62 @@ func newDefaultConfigStore() *ConfigStore {
 }
 
 func LoadConfig() (*ConfigStore, error) {
+	const maxReadAttempts = 3
+	const readRetryBackoff = 25 * time.Millisecond
+
 	path := GetConfigPath()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
+	var lastRaw []byte
+	var lastReadErr error
+	hasRead := false
+	var compat rawConfigCompat
+	parsed := false
+
+	for attempt := 0; attempt < maxReadAttempts; attempt++ {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				cfg := newDefaultConfigStore()
+				_ = SaveConfig(cfg)
+				return cfg, nil
+			}
+			lastReadErr = err
+			if attempt+1 < maxReadAttempts {
+				time.Sleep(readRetryBackoff)
+			}
+			continue
+		}
+		hasRead = true
+		lastRaw = data
+		lastReadErr = nil
+
+		clean := bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+		trimmed := bytes.TrimSpace(clean)
+		if len(trimmed) == 0 {
+			if attempt+1 < maxReadAttempts {
+				time.Sleep(readRetryBackoff)
+				continue
+			}
 			cfg := newDefaultConfigStore()
 			_ = SaveConfig(cfg)
 			return cfg, nil
 		}
-		return nil, err
+
+		compat = rawConfigCompat{}
+		if trimmed[0] == '{' && json.Unmarshal(trimmed, &compat) == nil {
+			parsed = true
+			break
+		}
+
+		if attempt+1 < maxReadAttempts {
+			time.Sleep(readRetryBackoff)
+		}
 	}
 
-	clean := bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
-	trimmed := bytes.TrimSpace(clean)
-	if len(trimmed) == 0 {
-		cfg := newDefaultConfigStore()
-		_ = SaveConfig(cfg)
-		return cfg, nil
+	if !hasRead || lastReadErr != nil {
+		return nil, lastReadErr
 	}
-
-	var compat rawConfigCompat
-	if trimmed[0] != '{' || json.Unmarshal(trimmed, &compat) != nil {
-		_ = os.WriteFile(path+".corrupt.bak", data, 0644)
+	if !parsed {
+		_ = os.WriteFile(path+".corrupt.bak", lastRaw, 0644)
 		cfg := newDefaultConfigStore()
 		_ = SaveConfig(cfg)
 		return cfg, nil
@@ -283,20 +318,30 @@ func SaveConfig(cfg *ConfigStore) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	_ = tmpFile.Sync()
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
 	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
 	_ = os.Chmod(tmpPath, 0644)
-	if err := os.Rename(tmpPath, cfgPath); err != nil {
-		if wErr := os.WriteFile(cfgPath, data, 0644); wErr != nil {
-			_ = os.Remove(tmpPath)
-			return err
+
+	const maxRenameAttempts = 5
+	const renameRetryBackoff = 25 * time.Millisecond
+	var renameErr error
+	for attempt := 0; attempt < maxRenameAttempts; attempt++ {
+		if renameErr = os.Rename(tmpPath, cfgPath); renameErr == nil {
+			return nil
 		}
-		_ = os.Remove(tmpPath)
+		if attempt+1 < maxRenameAttempts {
+			time.Sleep(renameRetryBackoff)
+		}
 	}
-	return nil
+	_ = os.Remove(tmpPath)
+	return renameErr
 }
 
 func DevProfile() *FocusProfile {

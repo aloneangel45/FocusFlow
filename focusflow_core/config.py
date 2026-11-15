@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 from .paths import get_config_path, get_state_dir
 from .sanitize import (
@@ -351,7 +352,17 @@ def save_config(cfg: ConfigStore, state_dir: str | None = None) -> None:
             os.chmod(tmp_path, 0o644)
         except OSError:
             pass
-        os.replace(tmp_path, cfg_path)
+        last_err: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, cfg_path)
+                return
+            except OSError as exc:
+                last_err = exc
+                if attempt + 1 < 5:
+                    time.sleep(0.025)
+        if last_err is not None:
+            raise last_err
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -385,24 +396,59 @@ def load_config(state_dir: str | None = None) -> ConfigStore:
         save_config(cfg_default, state_dir=resolved_dir)
         return cfg_default
 
-    if not os.path.exists(cfg_path):
+    raw: dict[str, object] | None = None
+    last_raw_bytes = b""
+    last_read_err: OSError | None = None
+    saw_empty = False
+    saw_parse_error = False
+
+    for attempt in range(3):
+        try:
+            with open(cfg_path, "rb") as f:
+                raw_bytes = f.read()
+        except FileNotFoundError:
+            return _init_default()
+        except OSError as exc:
+            last_read_err = exc
+            if attempt + 1 < 3:
+                time.sleep(0.025)
+            continue
+
+        last_read_err = None
+        last_raw_bytes = raw_bytes
+        clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
+        if not clean_bytes.strip():
+            saw_empty = True
+            saw_parse_error = False
+            if attempt + 1 < 3:
+                time.sleep(0.025)
+            continue
+        saw_empty = False
+
+        try:
+            parsed = json.loads(clean_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            saw_parse_error = True
+            if attempt + 1 < 3:
+                time.sleep(0.025)
+            continue
+
+        if not isinstance(parsed, dict):
+            saw_parse_error = True
+            if attempt + 1 < 3:
+                time.sleep(0.025)
+            continue
+
+        raw = parsed
+        saw_parse_error = False
+        break
+
+    if last_read_err is not None:
+        raise last_read_err
+    if saw_empty:
         return _init_default()
-
-    with open(cfg_path, "rb") as f:
-        raw_bytes = f.read()
-
-    clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
-    if not clean_bytes.strip():
-        return _init_default()
-
-    try:
-        raw = json.loads(clean_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        _backup_corrupted_config(cfg_path, raw_bytes)
-        return _init_default()
-
-    if not isinstance(raw, dict):
-        _backup_corrupted_config(cfg_path, raw_bytes)
+    if saw_parse_error or raw is None:
+        _backup_corrupted_config(cfg_path, last_raw_bytes)
         return _init_default()
 
     cd = raw.get("custom_domains")

@@ -1,5 +1,5 @@
 """
-FocusFlow v2.2.1 - Native Desktop Deep Work & Distraction Shield HUD
+FocusFlow v2.2.2 - Native Desktop Deep Work & Distraction Shield HUD
 Theme: Catppuccin Mocha Minimal Systems Architecture (Zero-Emoji)
 High-DPI Per-Monitor v2, Crash-Safe SHA-256 Hosts Engine, Win32 Toolhelp32 Supervisor
 """
@@ -12,6 +12,7 @@ import json
 import os
 import random
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -51,6 +52,40 @@ try:
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
+
+
+def _write_gui_prefs_atomic(prefs_path: str, prefs: dict[str, object]) -> None:
+    """Atomically write gui_settings.json via same-dir tempfile + fsync + os.replace retry."""
+    parent = os.path.dirname(prefs_path) or "."
+    os.makedirs(parent, exist_ok=True)
+    payload = (json.dumps(prefs, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    fd, tmp_path = tempfile.mkstemp(prefix="gui-settings-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, 0o644)
+        except OSError:
+            pass
+        last_err: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, prefs_path)
+                return
+            except OSError as exc:
+                last_err = exc
+                if attempt + 1 < 5:
+                    time.sleep(0.025)
+        if last_err is not None:
+            raise last_err
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def configure_windows_dpi() -> None:
@@ -315,30 +350,34 @@ class FocusFlowGUI:
 
         prefs_path = get_gui_settings_path(self.state_dir)
         if os.path.exists(prefs_path):
-            try:
-                with open(prefs_path, "r", encoding="utf-8-sig") as f:
-                    saved = json.load(f)
-                if isinstance(saved, dict):
-                    for key in ("mode", "profile", "strict_mode"):
-                        if key in saved:
-                            self.gui_prefs[key] = saved[key]
-                    for int_key, default_val in (
-                        ("pomo_work", 25),
-                        ("pomo_break", 5),
-                        ("standard_duration", 60),
-                        ("flex_duration", 90),
-                    ):
-                        if int_key in saved and saved[int_key] is not None and not isinstance(saved[int_key], bool):
-                            try:
-                                self.gui_prefs[int_key] = max(1, min(720, int(saved[int_key])))
-                            except (TypeError, ValueError):
-                                self.gui_prefs[int_key] = default_val
-                    if isinstance(saved.get("quotes"), list) and saved["quotes"]:
-                        valid_quotes = [str(q) for q in saved["quotes"] if q is not None and str(q).strip()]
-                        if valid_quotes:
-                            self.gui_prefs["quotes"] = valid_quotes
-            except Exception:
-                pass
+            saved = None
+            for attempt in range(3):
+                try:
+                    with open(prefs_path, "r", encoding="utf-8-sig") as f:
+                        saved = json.load(f)
+                    break
+                except Exception:
+                    if attempt + 1 < 3:
+                        time.sleep(0.025)
+            if isinstance(saved, dict):
+                for key in ("mode", "profile", "strict_mode"):
+                    if key in saved:
+                        self.gui_prefs[key] = saved[key]
+                for int_key, default_val in (
+                    ("pomo_work", 25),
+                    ("pomo_break", 5),
+                    ("standard_duration", 60),
+                    ("flex_duration", 90),
+                ):
+                    if int_key in saved and saved[int_key] is not None and not isinstance(saved[int_key], bool):
+                        try:
+                            self.gui_prefs[int_key] = max(1, min(720, int(saved[int_key])))
+                        except (TypeError, ValueError):
+                            self.gui_prefs[int_key] = default_val
+                if isinstance(saved.get("quotes"), list) and saved["quotes"]:
+                    valid_quotes = [str(q) for q in saved["quotes"] if q is not None and str(q).strip()]
+                    if valid_quotes:
+                        self.gui_prefs["quotes"] = valid_quotes
 
         self.current_mode = str(self.gui_prefs.get("mode", "pomodoro"))
         if self.current_mode not in ("pomodoro", "standard", "flex"):
@@ -351,8 +390,7 @@ class FocusFlowGUI:
     def save_gui_prefs(self) -> None:
         prefs_path = get_gui_settings_path(self.state_dir)
         try:
-            with open(prefs_path, "w", encoding="utf-8") as f:
-                json.dump(self.gui_prefs, f, indent=2, ensure_ascii=False)
+            _write_gui_prefs_atomic(prefs_path, self.gui_prefs)
         except Exception:
             pass
 
@@ -1915,7 +1953,7 @@ class FocusFlowGUI:
                         session_id=meta.session_id,
                         pid=os.getpid(),
                         started_at=meta.started_at,
-                        expected_end_at=now_utc + datetime.timedelta(minutes=max(1, mins)),
+                        expected_end_at=now_utc + datetime.timedelta(minutes=max(1, mins) + 1),
                         profile=meta.profile,
                     )
                     self._active_session_meta = meta

@@ -62,6 +62,20 @@ _PROTECTED_BASE_NAMES: tuple[str, ...] = (
     "systemd",
     "launchd",
     "kernel_task",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "sshd",
+    "sudo",
+    "login",
+    "dbus-daemon",
+    "gnome-shell",
+    "plasmashell",
+    "xorg",
+    "xwayland",
+    "windowserver",
 )
 
 PROTECTED_PROCESS_NAMES: frozenset[str] = frozenset(

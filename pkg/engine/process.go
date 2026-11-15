@@ -103,14 +103,17 @@ func resolveProcFSNames(procRoot string, pidStr string) []string {
 		}
 	}
 
+	// Always resolve /proc/<pid>/exe unconditionally so prctl(PR_SET_NAME) short comm spoofing
+	// cannot disguise either a protected system binary or a blocked target executable.
+	if exeTarget, err := os.Readlink(filepath.Join(pidDir, "exe")); err == nil {
+		exeTarget = strings.TrimSuffix(exeTarget, " (deleted)")
+		if base := cleanBasename(exeTarget); base != "" {
+			candidates = append(candidates, base)
+		}
+	}
+
 	// Linux kernel TASK_COMM_LEN is 16 bytes (max 15 visible chars in /proc/<pid>/comm).
 	if commName == "" || len(commName) >= 15 {
-		if exeTarget, err := os.Readlink(filepath.Join(pidDir, "exe")); err == nil {
-			exeTarget = strings.TrimSuffix(exeTarget, " (deleted)")
-			if base := cleanBasename(exeTarget); base != "" {
-				candidates = append(candidates, base)
-			}
-		}
 		if cmdBytes, err := os.ReadFile(filepath.Join(pidDir, "cmdline")); err == nil && len(cmdBytes) > 0 {
 			argv0 := cmdBytes
 			if nulIdx := bytes.IndexByte(cmdBytes, 0); nulIdx >= 0 {

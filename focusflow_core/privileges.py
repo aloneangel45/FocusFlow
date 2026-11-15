@@ -8,6 +8,11 @@ import subprocess
 import sys
 import threading
 
+from .paths import get_state_dir
+
+if sys.platform == "win32":
+    from ctypes import wintypes
+
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
@@ -17,7 +22,7 @@ def is_elevated() -> bool:
         try:
             shell32 = ctypes.WinDLL("shell32", use_last_error=True)
             shell32.IsUserAnAdmin.argtypes = []
-            shell32.IsUserAnAdmin.restype = ctypes.wintypes.BOOL if hasattr(ctypes, "wintypes") else ctypes.c_int
+            shell32.IsUserAnAdmin.restype = wintypes.BOOL
             return bool(shell32.IsUserAnAdmin())
         except Exception:
             return False
@@ -41,6 +46,27 @@ def build_elevation_cmdline(script_path: str | None = None, extra_args: list[str
     return subprocess.list2cmdline([target, *args])
 
 
+def build_posix_sudo_command(
+    exe: str,
+    target: str,
+    args: list[str],
+    state_dir: str | None = None,
+    hosts_override: str | None = None,
+) -> list[str]:
+    """Build POSIX sudo command forwarding FOCUSFLOW_HOME across sudo's env_reset."""
+    resolved_state = (state_dir if state_dir is not None else get_state_dir()).strip()
+    resolved_hosts = (
+        hosts_override if hosts_override is not None else os.environ.get("FOCUSFLOW_HOSTS_PATH", "")
+    ).strip()
+    cmd: list[str] = ["sudo", "env"]
+    if resolved_state:
+        cmd.append(f"FOCUSFLOW_HOME={os.path.normpath(resolved_state)}")
+    if resolved_hosts:
+        cmd.append(f"FOCUSFLOW_HOSTS_PATH={os.path.normpath(resolved_hosts)}")
+    cmd.extend([exe, target, *args])
+    return cmd
+
+
 def elevate_self(
     script_path: str | None = None,
     extra_args: list[str] | None = None,
@@ -49,15 +75,14 @@ def elevate_self(
     """Relaunch the current Python entrypoint with Administrator/root privileges.
 
     Uses ShellExecuteW(None, "runas", ...) with subprocess.list2cmdline on Windows
-    so workspace/user paths containing spaces never break.
+    so workspace/user paths containing spaces never break, and forwards FOCUSFLOW_HOME
+    across POSIX sudo so privileged/unprivileged runs share the same state directory.
     """
     exe = executable or sys.executable
     params = build_elevation_cmdline(script_path=script_path, extra_args=extra_args)
     cwd = os.getcwd()
 
     if sys.platform == "win32":
-        from ctypes import wintypes
-
         # Prefer pythonw.exe when launching GUI without console flash if running from FocusFlowGUI.py
         target_name = os.path.basename(script_path or sys.argv[0]).lower()
         if executable is None and target_name.endswith("gui.py") and exe.lower().endswith("python.exe"):
@@ -81,8 +106,13 @@ def elevate_self(
 
     target = os.path.abspath(script_path or sys.argv[0])
     args = list(extra_args) if extra_args is not None else [a for a in sys.argv[1:] if a != "--elevate"]
+    state_dir = get_state_dir()
+    sudo_cmd = build_posix_sudo_command(exe, target, args, state_dir=state_dir)
+    child_env = os.environ.copy()
+    if state_dir:
+        child_env["FOCUSFLOW_HOME"] = os.path.normpath(state_dir)
     try:
-        proc = subprocess.Popen(["sudo", exe, target, *args], cwd=cwd)
+        proc = subprocess.Popen(sudo_cmd, cwd=cwd, env=child_env)
         return proc.pid > 0
     except Exception:
         return False

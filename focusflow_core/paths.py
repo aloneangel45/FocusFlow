@@ -15,14 +15,54 @@ SESSIONS_FILENAME = "sessions.json"
 GUI_SETTINGS_FILENAME = "gui_settings.json"
 
 
+def _resolve_sudo_user_home(sudo_user: str) -> str:
+    """Resolve invoking non-root user's home directory when running under POSIX sudo."""
+    username = (sudo_user or "").strip()
+    if not username or username == "root" or "/" in username or "\\" in username or ":" in username:
+        return ""
+
+    try:
+        import pwd  # type: ignore[import-not-found]
+
+        pw_dir = pwd.getpwnam(username).pw_dir
+        if pw_dir and os.path.isabs(pw_dir):
+            return os.path.normpath(pw_dir)
+    except Exception:
+        pass
+
+    try:
+        with open("/etc/passwd", "r", encoding="utf-8", errors="replace") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.split(":")
+                if len(fields) >= 6 and fields[0] == username:
+                    cand = fields[5].strip()
+                    if cand and os.path.isabs(cand):
+                        return os.path.normpath(cand)
+    except OSError:
+        pass
+
+    expanded = os.path.expanduser(f"~{username}")
+    if expanded and not expanded.startswith("~") and os.path.isabs(expanded):
+        return os.path.normpath(expanded)
+
+    fallback = os.path.join("/Users" if sys.platform == "darwin" else "/home", username)
+    if os.path.isdir(fallback):
+        return os.path.normpath(fallback)
+    return ""
+
+
 def get_state_dir() -> str:
     """Resolve FocusFlow state directory identically to Go `storage.GetStateDir()`.
 
     Priority:
       1. FOCUSFLOW_HOME environment override
       2. Windows: %APPDATA%\\FocusFlow (or ~/AppData/Roaming/FocusFlow)
-      3. POSIX: $XDG_CONFIG_HOME/focusflow (or ~/.config/focusflow)
-      4. Fallback: .focusflow
+      3. POSIX under sudo (euid == 0 & SUDO_USER set): ~SUDO_USER/.config/focusflow
+      4. POSIX: $XDG_CONFIG_HOME/focusflow (or ~/.config/focusflow)
+      5. Fallback: .focusflow
     """
     override = os.environ.get("FOCUSFLOW_HOME", "").strip()
     if override:
@@ -36,6 +76,16 @@ def get_state_dir() -> str:
         if home and home != "~":
             return os.path.join(home, "AppData", "Roaming", "FocusFlow")
         return ".focusflow"
+
+    try:
+        is_root = os.geteuid() == 0
+    except AttributeError:
+        is_root = False
+
+    if is_root:
+        sudo_home = _resolve_sudo_user_home(os.environ.get("SUDO_USER", ""))
+        if sudo_home:
+            return os.path.join(sudo_home, ".config", "focusflow")
 
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     if xdg:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,10 +23,22 @@ import (
 )
 
 // Version is set at build time via -ldflags "-X main.Version=..."
-var Version = "2.2.1"
+var Version = "2.2.2"
 
 func main() {
 	os.Exit(runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+func shouldSkipStartupAutoRecovery(command string) bool {
+	switch command {
+	case "version", "--version", "-v",
+		"help", "--help", "-h",
+		"doctor", "recover", "stop",
+		"status", "stats", "list", "export":
+		return true
+	default:
+		return false
+	}
 }
 
 func stripElevateFlag(args []string) ([]string, bool) {
@@ -69,10 +82,9 @@ func runCLI(rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	subArgs := args[1:]
 
-	// Run automatic orphan journal recovery before regular commands
-	if command != "version" && command != "--version" && command != "-v" &&
-		command != "help" && command != "--help" && command != "-h" &&
-		command != "doctor" && command != "recover" && command != "stop" {
+	// Run automatic orphan journal recovery before mutating session/config commands,
+	// skipping purely read-only and explicit lifecycle/diagnostic commands.
+	if !shouldSkipStartupAutoRecovery(command) {
 		_, _ = runStartupAutoRecovery()
 	}
 
@@ -1162,6 +1174,12 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 				_, _ = fmt.Fprintf(stdout, "  [CYCLE %d/%d] [BREAK] Starting %d min recovery break (hosts shield temporarily lifted)...\n",
 					cycle, totalCycles, breakMin)
 			} else if continuousLockdown {
+				sessionMeta.ExpectedEndAt = time.Now().UTC().Add(time.Duration(breakSeconds)*time.Second + time.Minute)
+				if hostsEngaged {
+					if err := hosts.ApplyBlocklistWithSession(allDomains, sessionMeta); err != nil {
+						hostsEngaged = false
+					}
+				}
 				_, _ = fmt.Fprintf(stdout, "  [CYCLE %d/%d] [BREAK] Starting %d min recovery break (hardcore lockdown continuous)...\n",
 					cycle, totalCycles, breakMin)
 			} else {
@@ -1462,6 +1480,45 @@ func handleStats(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func writeAtomicExportFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(dir, "focusflow-export-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	_ = os.Chmod(tmpPath, 0644)
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		renameErr = os.Rename(tmpPath, path)
+		if renameErr == nil {
+			return nil
+		}
+		if attempt+1 < 5 {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	_ = os.Remove(tmpPath)
+	return renameErr
+}
+
 func handleExport(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -1483,31 +1540,17 @@ func handleExport(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	var dest io.Writer = stdout
-	var outFile *os.File
-	if strings.TrimSpace(*outPath) != "" {
-		cleanOut := filepath.Clean(*outPath)
-		if err := os.MkdirAll(filepath.Dir(cleanOut), 0755); err != nil {
-			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot create export directory: %v\n", err)
-			return 1
-		}
-		outFile, err = os.Create(cleanOut)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot create export file: %v\n", err)
-			return 1
-		}
-		defer outFile.Close()
-		dest = outFile
-	}
-
+	// Read and serialize all session data into memory BEFORE creating or replacing --out,
+	// so `focusflow export --out <sessions.json>` never truncates sessions.json before reading it.
+	var buf bytes.Buffer
 	switch strings.ToLower(strings.TrimSpace(*format)) {
 	case "json":
-		if err := store.ExportJSON(dest, *days, time.Now()); err != nil {
+		if err := store.ExportJSON(&buf, *days, time.Now()); err != nil {
 			_, _ = fmt.Fprintf(stderr, "[ERR] JSON export failed: %v\n", err)
 			return 1
 		}
 	case "csv":
-		if err := store.ExportCSV(dest); err != nil {
+		if err := store.ExportCSV(&buf); err != nil {
 			_, _ = fmt.Fprintf(stderr, "[ERR] CSV export failed: %v\n", err)
 			return 1
 		}
@@ -1516,9 +1559,17 @@ func handleExport(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if outFile != nil {
-		_, _ = fmt.Fprintf(stdout, "[OK] Exported %s report to %s\n", strings.ToUpper(*format), outFile.Name())
+	if strings.TrimSpace(*outPath) != "" {
+		cleanOut := filepath.Clean(*outPath)
+		if err := writeAtomicExportFile(cleanOut, buf.Bytes()); err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot write export file: %v\n", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(stdout, "[OK] Exported %s report to %s\n", strings.ToUpper(*format), cleanOut)
+		return 0
 	}
+
+	_, _ = stdout.Write(buf.Bytes())
 	return 0
 }
 

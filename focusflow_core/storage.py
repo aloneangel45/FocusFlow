@@ -11,6 +11,7 @@ import os
 import secrets
 import tempfile
 import threading
+import time
 
 from .config import (
     DEFAULT_DAILY_GOAL_MINUTES,
@@ -186,43 +187,65 @@ class SessionStore:
             pass
 
     def _read_locked(self) -> list[SessionRecord]:
-        if not os.path.exists(self.path):
-            return []
-        try:
-            with open(self.path, "rb") as f:
-                raw_bytes = f.read()
-        except OSError:
+        last_raw_bytes = b""
+        saw_read_error = False
+        saw_empty = False
+        saw_parse_error = False
+
+        for attempt in range(3):
+            try:
+                with open(self.path, "rb") as f:
+                    raw_bytes = f.read()
+            except FileNotFoundError:
+                return []
+            except OSError:
+                saw_read_error = True
+                if attempt + 1 < 3:
+                    time.sleep(0.025)
+                continue
+
+            last_raw_bytes = raw_bytes
+            saw_read_error = False
+            clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
+            if not clean_bytes.strip():
+                saw_empty = True
+                saw_parse_error = False
+                if attempt + 1 < 3:
+                    time.sleep(0.025)
+                continue
+            saw_empty = False
+
+            try:
+                raw = json.loads(clean_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                saw_parse_error = True
+                if attempt + 1 < 3:
+                    time.sleep(0.025)
+                continue
+
+            if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
+                out: list[SessionRecord] = []
+                for item in raw["sessions"]:
+                    if isinstance(item, dict):
+                        try:
+                            out.append(SessionRecord.from_dict(item))
+                        except Exception:
+                            continue
+                return out
+
+            saw_parse_error = True
+            if attempt + 1 < 3:
+                time.sleep(0.025)
+
+        if saw_read_error or saw_empty:
             return []
 
-        clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
-        if not clean_bytes.strip():
-            return []
-
-        try:
-            raw = json.loads(clean_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._backup_corrupted_locked(raw_bytes)
+        if saw_parse_error:
+            self._backup_corrupted_locked(last_raw_bytes)
             try:
                 self._write_locked([])
             except OSError:
                 pass
-            return []
-
-        if isinstance(raw, dict) and isinstance(raw.get("sessions"), list):
-            out: list[SessionRecord] = []
-            for item in raw["sessions"]:
-                if isinstance(item, dict):
-                    try:
-                        out.append(SessionRecord.from_dict(item))
-                    except Exception:
-                        continue
-            return out
-
-        self._backup_corrupted_locked(raw_bytes)
-        try:
-            self._write_locked([])
-        except OSError:
-            pass
         return []
 
     def _write_locked(self, sessions: list[SessionRecord]) -> None:
@@ -240,7 +263,17 @@ class SessionStore:
                 os.chmod(tmp_path, 0o644)
             except OSError:
                 pass
-            os.replace(tmp_path, self.path)
+            last_err: OSError | None = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, self.path)
+                    return
+                except OSError as exc:
+                    last_err = exc
+                    if attempt + 1 < 5:
+                        time.sleep(0.025)
+            if last_err is not None:
+                raise last_err
         except Exception:
             try:
                 os.unlink(tmp_path)
@@ -566,7 +599,6 @@ class SessionStore:
         now: datetime.datetime | None = None,
     ) -> str:
         clean_path = os.path.abspath(out_path)
-        os.makedirs(os.path.dirname(clean_path) or ".", exist_ok=True)
         fmt_lower = fmt.strip().lower()
         if fmt_lower == "json":
             content = self.export_json_string(days=days, now=now)
@@ -574,6 +606,35 @@ class SessionStore:
             content = self.export_csv_string()
         else:
             raise ValueError(f"unsupported export format: {fmt}")
-        with open(clean_path, "w", encoding="utf-8", newline="") as f:
-            f.write(content)
+
+        parent = os.path.dirname(clean_path) or "."
+        os.makedirs(parent, exist_ok=True)
+        payload = content.encode("utf-8")
+        fd, tmp_path = tempfile.mkstemp(prefix="focusflow-export-", suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                os.chmod(tmp_path, 0o644)
+            except OSError:
+                pass
+            last_err: OSError | None = None
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, clean_path)
+                    return clean_path
+                except OSError as exc:
+                    last_err = exc
+                    if attempt + 1 < 5:
+                        time.sleep(0.025)
+            if last_err is not None:
+                raise last_err
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         return clean_path

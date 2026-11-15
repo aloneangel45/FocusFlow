@@ -7,6 +7,7 @@ import hashlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -37,8 +38,25 @@ def test_install_sh_lf_syntax_and_release_asset_alignment() -> None:
     assert "SHA-256 checksum verification FAILED" in text
     assert "${trimmed_ver#[vV]}" in text
     assert r"sub(/^\357\273\277/" in text
-    # Verify checksum check precedes tar extraction
+    # Verify checksum check precedes tar extraction and installation uses atomic .tmp.$$ + mv -f
     assert text.index("SHA-256 checksum verification FAILED") < text.index("tar -xzf")
+    assert 'mkdir -p "$INSTALL_DIR"' in text
+    assert 'TMP_TARGET_BIN="${TARGET_BIN}.tmp.$$"' in text
+    assert 'mv -f "$TMP_TARGET_BIN" "$TARGET_BIN"' in text
+
+
+def _sanitize_psmodulepath_for_desktop_powershell(env: dict[str, str]) -> dict[str, str]:
+    clean = env.copy()
+    raw_psmp = clean.get("PSModulePath", "")
+    if raw_psmp:
+        kept = [
+            entry.strip()
+            for entry in raw_psmp.split(";")
+            if entry.strip()
+            and not re.search(r"(?i)[\\/]PowerShell[\\/](?:[67][^\\/]*|Modules)(?:[\\/]|$)", entry.strip())
+        ]
+        clean["PSModulePath"] = ";".join(kept)
+    return clean
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell installer end-to-end test runs on Windows")
@@ -87,7 +105,7 @@ def test_install_ps1_end_to_end_sha256_verification(tmp_path: Path) -> None:
     thread.start()
 
     try:
-        env = os.environ.copy()
+        env = _sanitize_psmodulepath_for_desktop_powershell(os.environ.copy())
         env["FOCUSFLOW_BASE_URL"] = f"http://127.0.0.1:{port}"
         env["FOCUSFLOW_INSTALL_DIR"] = str(install_dir)
         env["FOCUSFLOW_NO_PATH_UPDATE"] = "1"
@@ -104,7 +122,7 @@ def test_install_ps1_end_to_end_sha256_verification(tmp_path: Path) -> None:
         installed_exe = install_dir / "focusflow.exe"
         assert installed_exe.exists()
         assert "Verified SHA-256" in ok_run.stdout
-        assert "FocusFlow v2.2.1" in ok_run.stdout
+        assert "FocusFlow v2.2.2" in ok_run.stdout
 
         # 1b. UTF-8 BOM in checksums.txt (emitted by PowerShell Set-Content -Encoding UTF8) must also succeed
         bom_dir = tmp_path / "bom_install"

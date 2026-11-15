@@ -98,12 +98,15 @@ def test_missing_end_marker_safe_stripping_no_corruption() -> None:
     )
     assert strip_managed_blocks(truncated_current) == "127.0.0.1 localhost\n::1 localhost\n"
 
-    truncated_legacy_with_custom = (
+    truncated_with_custom_entries = (
         "127.0.0.1 localhost\r\n\r\n"
-        f"{LEGACY_MARKER_BEGIN}\r\n127.0.0.1 instagram.com\r\n"
-        "10.0.0.25 internal.corp\r\n"
+        f"{LEGACY_MARKER_BEGIN}\r\n# FocusFlow sinkhole header\r\n0.0.0.0 instagram.com\r\n:: instagram.com\r\n"
+        "# Docker Desktop managed hosts\r\n127.0.0.1 dev.internal\r\n10.0.0.25 internal.corp\r\n"
     )
-    assert strip_managed_blocks(truncated_legacy_with_custom) == "127.0.0.1 localhost\r\n10.0.0.25 internal.corp\r\n"
+    assert (
+        strip_managed_blocks(truncated_with_custom_entries)
+        == "127.0.0.1 localhost\r\n# Docker Desktop managed hosts\r\n127.0.0.1 dev.internal\r\n10.0.0.25 internal.corp\r\n"
+    )
 
 
 def test_crlf_and_lf_line_ending_preservation(hermetic_focusflow_env: tuple[Path, Path]) -> None:

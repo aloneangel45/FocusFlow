@@ -28,6 +28,8 @@ const (
 
 	BackupFilename  = "hosts.focusflow.bak"
 	JournalFilename = "hosts.focusflow.journal.json"
+
+	AlivePIDLeaseGrace = 15 * time.Minute
 )
 
 type HostsJournal struct {
@@ -167,22 +169,14 @@ func isLikelyFocusFlowSinkholeLine(trimmed string) bool {
 		return true
 	}
 	if strings.HasPrefix(t, "#") {
-		lower := strings.ToLower(t)
-		return strings.Contains(lower, "focusflow") || strings.Contains(lower, "managed") || strings.Contains(lower, "sinkhole") || strings.Contains(lower, "distraction")
+		return strings.Contains(strings.ToLower(t), "focusflow")
 	}
 	fields := strings.Fields(t)
-	if len(fields) < 2 {
+	if len(fields) < 2 || strings.HasPrefix(fields[1], "#") {
 		return false
 	}
 	ip := fields[0]
-	host := strings.ToLower(fields[1])
-	if ip == "0.0.0.0" || ip == "::" {
-		return true
-	}
-	if ip == "127.0.0.1" && host != "localhost" && host != "localhost.localdomain" {
-		return true
-	}
-	return false
+	return ip == "0.0.0.0" || ip == "::"
 }
 
 // StripManagedBlocks removes all current and legacy FocusFlow managed blocks deterministically.
@@ -301,14 +295,18 @@ func writeAtomicStateFile(path string, data []byte) error {
 		return err
 	}
 	_ = os.Chmod(tmpPath, 0644)
-	if err := os.Rename(tmpPath, path); err != nil {
-		if wErr := os.WriteFile(path, data, 0644); wErr != nil {
-			_ = os.Remove(tmpPath)
-			return err
+	var renameErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		renameErr = os.Rename(tmpPath, path)
+		if renameErr == nil {
+			return nil
 		}
-		_ = os.Remove(tmpPath)
+		if attempt+1 < 5 {
+			time.Sleep(25 * time.Millisecond)
+		}
 	}
-	return nil
+	_ = os.Remove(tmpPath)
+	return renameErr
 }
 
 // Backup creates a guaranteed-clean baseline backup of the hosts file (stripping any
@@ -335,16 +333,38 @@ func (h *HostsManager) Backup() (string, error) {
 }
 
 func (h *HostsManager) LoadJournal() (*HostsJournal, error) {
-	raw, err := os.ReadFile(h.journalPath)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		raw, err := os.ReadFile(h.journalPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, err
+			}
+			lastErr = err
+			if attempt+1 < 3 {
+				time.Sleep(25 * time.Millisecond)
+			}
+			continue
+		}
+		raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+		if len(bytes.TrimSpace(raw)) == 0 {
+			lastErr = fmt.Errorf("empty hosts journal")
+			if attempt+1 < 3 {
+				time.Sleep(25 * time.Millisecond)
+			}
+			continue
+		}
+		var j HostsJournal
+		if err := json.Unmarshal(raw, &j); err != nil {
+			lastErr = err
+			if attempt+1 < 3 {
+				time.Sleep(25 * time.Millisecond)
+			}
+			continue
+		}
+		return &j, nil
 	}
-	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
-	var j HostsJournal
-	if err := json.Unmarshal(raw, &j); err != nil {
-		return nil, err
-	}
-	return &j, nil
+	return nil, lastErr
 }
 
 func (h *HostsManager) writeJournal(j *HostsJournal) error {
@@ -479,6 +499,98 @@ func (h *HostsManager) ApplyBlocklistWithSession(domains []string, meta SessionM
 	return writeHostsFileSafe(h.hostsPath, []byte(newContent))
 }
 
+func hasIntactManagedSinkhole(content string, cleanDomains []string) bool {
+	rawLines := strings.Split(content, "\n")
+	beginIdx := -1
+	endIdx := -1
+	beginCount := 0
+	endCount := 0
+
+	for i, raw := range rawLines {
+		t := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if t == MarkerBegin {
+			beginCount++
+			if beginIdx < 0 {
+				beginIdx = i
+			}
+		} else if t == MarkerEnd {
+			endCount++
+			if endIdx < 0 {
+				endIdx = i
+			}
+		}
+	}
+
+	if beginCount != 1 || endCount != 1 || beginIdx < 0 || endIdx <= beginIdx {
+		return false
+	}
+
+	v4Active := make(map[string]struct{}, len(cleanDomains)*2)
+	v6Active := make(map[string]struct{}, len(cleanDomains)*2)
+
+	for _, raw := range rawLines[beginIdx+1 : endIdx] {
+		line := strings.TrimSuffix(raw, "\r")
+		if hashIdx := strings.IndexByte(line, '#'); hashIdx >= 0 {
+			line = line[:hashIdx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := fields[0]
+		if ip != "0.0.0.0" && ip != "::" {
+			continue
+		}
+		for _, hostTok := range fields[1:] {
+			h := strings.ToLower(strings.TrimSpace(hostTok))
+			if h == "" {
+				continue
+			}
+			if ip == "0.0.0.0" {
+				v4Active[h] = struct{}{}
+			} else {
+				v6Active[h] = struct{}{}
+			}
+		}
+	}
+
+	for _, d := range cleanDomains {
+		if _, ok := v4Active[d]; !ok {
+			return false
+		}
+		if _, ok := v6Active[d]; !ok {
+			return false
+		}
+		if !strings.HasPrefix(d, "www.") {
+			wwwHost := "www." + d
+			if _, ok := v4Active[wwwHost]; !ok {
+				return false
+			}
+			if _, ok := v6Active[wwwHost]; !ok {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// buildPosixElevateSudoArgs constructs sudo invocation arguments that forward FOCUSFLOW_HOME
+// (and FOCUSFLOW_HOSTS_PATH if set) across sudo's environment reset so privileged and
+// unprivileged processes always share the same state directory.
+func buildPosixElevateSudoArgs(exePath string, args []string, stateDir string, hostsOverride string) []string {
+	sudoArgs := []string{"env"}
+	if trimmedState := strings.TrimSpace(stateDir); trimmedState != "" {
+		sudoArgs = append(sudoArgs, "FOCUSFLOW_HOME="+trimmedState)
+	}
+	if trimmedHosts := strings.TrimSpace(hostsOverride); trimmedHosts != "" {
+		sudoArgs = append(sudoArgs, "FOCUSFLOW_HOSTS_PATH="+trimmedHosts)
+	}
+	sudoArgs = append(sudoArgs, exePath)
+	sudoArgs = append(sudoArgs, args...)
+	return sudoArgs
+}
+
 // VerifyOrReapply checks mid-session integrity of the managed block in hosts and re-applies
 // the sinkhole if any tampering or external overwrite occurred.
 func (h *HostsManager) VerifyOrReapply(domains []string, meta SessionMeta) (bool, error) {
@@ -491,17 +603,8 @@ func (h *HostsManager) VerifyOrReapply(domains []string, meta SessionMeta) (bool
 	if err != nil {
 		return false, err
 	}
-	content := string(rawData)
-	if !strings.Contains(content, MarkerBegin) || !strings.Contains(content, MarkerEnd) {
+	if !hasIntactManagedSinkhole(string(rawData), cleanDomains) {
 		return true, h.ApplyBlocklistWithSession(cleanDomains, meta)
-	}
-
-	for _, d := range cleanDomains {
-		v4 := "0.0.0.0 " + d
-		v6 := ":: " + d
-		if !strings.Contains(content, v4) || !strings.Contains(content, v6) {
-			return true, h.ApplyBlocklistWithSession(cleanDomains, meta)
-		}
 	}
 	return false, nil
 }
@@ -561,6 +664,10 @@ func (h *HostsManager) cleanupStateArtifacts() {
 }
 
 func isJournalExpired(expectedEndAt string, now time.Time) bool {
+	return isJournalExpiredWithGrace(expectedEndAt, now, 0)
+}
+
+func isJournalExpiredWithGrace(expectedEndAt string, now time.Time, grace time.Duration) bool {
 	expectedEndAt = strings.TrimSpace(expectedEndAt)
 	if expectedEndAt == "" {
 		return false
@@ -569,7 +676,7 @@ func isJournalExpired(expectedEndAt string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	return now.After(t)
+	return now.After(t.Add(grace))
 }
 
 // RecoverIfOrphaned inspects the write-ahead journal and hosts file on startup.
@@ -602,20 +709,18 @@ func (h *HostsManager) RecoverIfOrphanedAt(now time.Time, onOrphanSession func(s
 
 	if hasJournal {
 		orphanSessionID = journal.SessionID
-		expired := isJournalExpired(journal.ExpectedEndAt, now)
 		pidAlive := journal.PID > 0 && IsPIDAlive(journal.PID)
-
-		if pidAlive && !expired {
-			return &RecoveryResult{
-				Recovered:      false,
-				ActiveOwnerPID: journal.PID,
-				Reason:         "active_session_alive",
-			}, nil
-		}
-		if !pidAlive {
-			reason = fmt.Sprintf("owner_pid_%d_dead", journal.PID)
-		} else {
+		if pidAlive {
+			if !isJournalExpiredWithGrace(journal.ExpectedEndAt, now, AlivePIDLeaseGrace) {
+				return &RecoveryResult{
+					Recovered:      false,
+					ActiveOwnerPID: journal.PID,
+					Reason:         "active_session_alive",
+				}, nil
+			}
 			reason = "session_lease_expired"
+		} else {
+			reason = fmt.Sprintf("owner_pid_%d_dead", journal.PID)
 		}
 	} else if hasCorruptJournal {
 		reason = "corrupt_journal"

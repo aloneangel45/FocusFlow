@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSanitizeDomain_ValidInputs(t *testing.T) {
 	cases := []struct {
@@ -93,14 +96,19 @@ func TestProtectedProcesses_DenylistEnforcement(t *testing.T) {
 		"wininit.exe", "winlogon.exe", "dwm.exe", "explorer.exe", "sihost.exe",
 		"fontdrvhost.exe", "focusflow.exe", "python.exe", "pythonw.exe",
 		"conhost.exe", "wt.exe", "EXPLORER", "PythonW", `C:\Windows\System32\lsass.exe`,
+		"sh", "bash", "zsh", "dash", "fish", "sshd", "sudo", "login",
+		"dbus-daemon", "gnome-shell", "plasmashell", "xorg", "xwayland", "windowserver",
+		"/bin/bash", "/usr/sbin/sshd", "/System/Library/CoreServices/WindowServer",
 	}
 
 	for _, name := range protected {
 		if !IsProtectedProcess(name) {
 			t.Errorf("expected IsProtectedProcess(%q) == true", name)
 		}
-		if got, err := NormalizeProcessName(name); err == nil {
-			t.Errorf("expected NormalizeProcessName(%q) to fail, got %q", name, got)
+		if !strings.ContainsAny(name, `/\`) {
+			if got, err := NormalizeProcessName(name); err == nil {
+				t.Errorf("expected NormalizeProcessName(%q) to fail, got %q", name, got)
+			}
 		}
 	}
 

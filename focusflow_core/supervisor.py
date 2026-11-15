@@ -133,17 +133,19 @@ def resolve_procfs_names(proc_root: str, pid_str: str) -> list[str]:
     except OSError:
         pass
 
-    if not comm_name or len(comm_name) >= 15:
-        try:
-            exe_target = os.readlink(os.path.join(pid_dir, "exe"))
-            if exe_target.endswith(" (deleted)"):
-                exe_target = exe_target[: -len(" (deleted)")]
-            base = _clean_basename(exe_target)
-            if base:
-                candidates.append(base)
-        except OSError:
-            pass
+    # Always resolve /proc/<pid>/exe unconditionally so prctl(PR_SET_NAME) short comm spoofing
+    # cannot disguise either a protected system binary or a blocked target executable.
+    try:
+        exe_target = os.readlink(os.path.join(pid_dir, "exe"))
+        if exe_target.endswith(" (deleted)"):
+            exe_target = exe_target[: -len(" (deleted)")]
+        base = _clean_basename(exe_target)
+        if base:
+            candidates.append(base)
+    except OSError:
+        pass
 
+    if not comm_name or len(comm_name) >= 15:
         try:
             with open(os.path.join(pid_dir, "cmdline"), "rb") as f:
                 raw_cmd = f.read(4096)

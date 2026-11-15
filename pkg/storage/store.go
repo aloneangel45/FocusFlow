@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -103,8 +104,61 @@ type Store struct {
 	mu   sync.Mutex
 }
 
+func lookupPasswdHome(passwdContent string, username string) string {
+	for _, line := range strings.Split(passwdContent, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) >= 6 && parts[0] == username {
+			if home := strings.TrimSpace(parts[5]); home != "" {
+				return home
+			}
+		}
+	}
+	return ""
+}
+
+func resolvePosixSudoUserHome(
+	sudoUser string,
+	goos string,
+	lookupUserFn func(string) (string, error),
+	passwdPath string,
+	isDirFn func(string) bool,
+) string {
+	sudoUser = strings.TrimSpace(sudoUser)
+	if sudoUser == "" || sudoUser == "root" || strings.ContainsAny(sudoUser, `/\`) || strings.Contains(sudoUser, "..") {
+		return ""
+	}
+	if lookupUserFn != nil {
+		if h, err := lookupUserFn(sudoUser); err == nil && strings.TrimSpace(h) != "" {
+			return filepath.Clean(strings.TrimSpace(h))
+		}
+	}
+	if passwdPath != "" {
+		if raw, err := os.ReadFile(passwdPath); err == nil {
+			if h := lookupPasswdHome(string(raw), sudoUser); h != "" {
+				return filepath.Clean(h)
+			}
+		}
+	}
+	var candidates []string
+	if goos == "darwin" {
+		candidates = []string{filepath.Join("/Users", sudoUser), filepath.Join("/home", sudoUser)}
+	} else {
+		candidates = []string{filepath.Join("/home", sudoUser), filepath.Join("/Users", sudoUser)}
+	}
+	for _, c := range candidates {
+		if isDirFn != nil && isDirFn(c) {
+			return filepath.Clean(c)
+		}
+	}
+	return ""
+}
+
 // GetStateDir resolves the unified FocusFlow state directory shared by Go CLI and Python GUI.
-// Priority: FOCUSFLOW_HOME -> %APPDATA%\FocusFlow (Windows) / ~/.config/focusflow (POSIX) -> .focusflow
+// Priority: FOCUSFLOW_HOME -> %APPDATA%\FocusFlow (Windows) / SUDO_USER ~/.config/focusflow (POSIX root under sudo) / ~/.config/focusflow (POSIX) -> .focusflow
 func GetStateDir() string {
 	if override := strings.TrimSpace(os.Getenv("FOCUSFLOW_HOME")); override != "" {
 		return filepath.Clean(override)
@@ -117,6 +171,29 @@ func GetStateDir() string {
 			return filepath.Join(home, "AppData", "Roaming", "FocusFlow")
 		}
 		return ".focusflow"
+	}
+	if os.Geteuid() == 0 {
+		if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); sudoUser != "" && sudoUser != "root" {
+			sudoHome := resolvePosixSudoUserHome(
+				sudoUser,
+				runtime.GOOS,
+				func(u string) (string, error) {
+					usr, err := user.Lookup(u)
+					if err != nil || usr == nil {
+						return "", err
+					}
+					return usr.HomeDir, nil
+				},
+				"/etc/passwd",
+				func(p string) bool {
+					info, err := os.Stat(p)
+					return err == nil && info.IsDir()
+				},
+			)
+			if sudoHome != "" {
+				return filepath.Join(sudoHome, ".config", "focusflow")
+			}
+		}
 	}
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
 		return filepath.Join(xdg, "focusflow")
@@ -175,31 +252,66 @@ func parseSessionTimestampUTC(ts string) (time.Time, bool) {
 }
 
 func (s *Store) readLocked() MetricsStore {
-	var data MetricsStore
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		data.Sessions = []SessionRecord{}
-		return data
+	const maxReadAttempts = 3
+	const readRetryBackoff = 25 * time.Millisecond
+
+	var lastRaw []byte
+	var lastReadErr error
+	hasRead := false
+
+	for attempt := 0; attempt < maxReadAttempts; attempt++ {
+		raw, err := os.ReadFile(s.path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return MetricsStore{Sessions: []SessionRecord{}}
+			}
+			lastReadErr = err
+			if attempt+1 < maxReadAttempts {
+				time.Sleep(readRetryBackoff)
+			}
+			continue
+		}
+		hasRead = true
+		lastRaw = raw
+		lastReadErr = nil
+
+		clean := stripUTF8BOM(raw)
+		trimmed := bytes.TrimSpace(clean)
+		if len(trimmed) == 0 {
+			if attempt+1 < maxReadAttempts {
+				time.Sleep(readRetryBackoff)
+				continue
+			}
+			return MetricsStore{Sessions: []SessionRecord{}}
+		}
+
+		var data MetricsStore
+		if trimmed[0] == '{' && json.Unmarshal(trimmed, &data) == nil {
+			if data.Sessions == nil {
+				data.Sessions = []SessionRecord{}
+			}
+			return data
+		}
+
+		if attempt+1 < maxReadAttempts {
+			time.Sleep(readRetryBackoff)
+		}
 	}
-	clean := stripUTF8BOM(raw)
-	trimmed := bytes.TrimSpace(clean)
-	if len(trimmed) == 0 {
-		data.Sessions = []SessionRecord{}
-		return data
+
+	if !hasRead || lastReadErr != nil {
+		return MetricsStore{Sessions: []SessionRecord{}}
 	}
-	if trimmed[0] != '{' || json.Unmarshal(trimmed, &data) != nil {
-		backupCorruptStateFile(s.path, raw)
-		data.Sessions = []SessionRecord{}
-		_ = s.writeLocked(data)
-		return data
-	}
-	if data.Sessions == nil {
-		data.Sessions = []SessionRecord{}
-	}
-	return data
+
+	backupCorruptStateFile(s.path, lastRaw)
+	healed := MetricsStore{Sessions: []SessionRecord{}}
+	_ = s.writeLocked(healed)
+	return healed
 }
 
 func (s *Store) writeLocked(data MetricsStore) error {
+	const maxRenameAttempts = 5
+	const renameRetryBackoff = 25 * time.Millisecond
+
 	if data.Sessions == nil {
 		data.Sessions = []SessionRecord{}
 	}
@@ -223,21 +335,28 @@ func (s *Store) writeLocked(data MetricsStore) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	_ = tmpFile.Sync()
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
 	if err := tmpFile.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
 	_ = os.Chmod(tmpPath, 0644)
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		// Windows fallback if destination exists and Rename transiently fails
-		if writeErr := os.WriteFile(s.path, out, 0644); writeErr != nil {
-			_ = os.Remove(tmpPath)
-			return err
+
+	var renameErr error
+	for attempt := 0; attempt < maxRenameAttempts; attempt++ {
+		if renameErr = os.Rename(tmpPath, s.path); renameErr == nil {
+			return nil
 		}
-		_ = os.Remove(tmpPath)
+		if attempt+1 < maxRenameAttempts {
+			time.Sleep(renameRetryBackoff)
+		}
 	}
-	return nil
+	_ = os.Remove(tmpPath)
+	return renameErr
 }
 
 // StartSession records the start of a focus sprint immediately so StartTime is accurate

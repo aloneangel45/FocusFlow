@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.sh | sh
 # Optional environment variables:
-#   FOCUSFLOW_VERSION     Release tag to install (e.g. "v2.2.1" or "latest", default: "latest")
+#   FOCUSFLOW_VERSION     Release tag to install (e.g. "v2.2.2" or "latest", default: "latest")
 #   FOCUSFLOW_INSTALL_DIR Target directory for the focusflow binary
 #   FOCUSFLOW_REPO        GitHub owner/repo (default: "aloneangel45/FocusFlow")
 #   FOCUSFLOW_BASE_URL    Override release download base URL (for mirrors/testing)
@@ -173,8 +173,11 @@ main() {
 
     mkdir -p "$INSTALL_DIR"
     TARGET_BIN="${INSTALL_DIR}/focusflow"
-    cp "$EXTRACTED_BIN" "$TARGET_BIN"
-    chmod 0755 "$TARGET_BIN"
+    TMP_TARGET_BIN="${TARGET_BIN}.tmp.$$"
+    rm -f "$TMP_TARGET_BIN"
+    cp "$EXTRACTED_BIN" "$TMP_TARGET_BIN"
+    chmod 0755 "$TMP_TARGET_BIN"
+    mv -f "$TMP_TARGET_BIN" "$TARGET_BIN"
 
     log_ok "Installed FocusFlow binary to ${TARGET_BIN}"
     "$TARGET_BIN" version || true

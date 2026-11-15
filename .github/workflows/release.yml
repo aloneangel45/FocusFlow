@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build-and-release:
     name: Verify, Build & Release FocusFlow
@@ -37,13 +40,17 @@ jobs:
           go vet ./...
           go test -v ./...
 
-      - name: Verify Python pytest suite
+      - name: Verify Python unittest & pytest suites
         run: |
           python -m pip install --upgrade pip pytest
+          python -m unittest discover -s tests -v
           python -m pytest -v
 
       - name: Install packaging tools
-        run: sudo apt-get update && sudo apt-get install -y zip
+        run: |
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zip
+          fi
 
       - name: Build cross-platform binaries
         run: |
@@ -51,7 +58,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="2.2.1"
+            VERSION="2.2.2"
           fi
           LDFLAGS="-s -w -X main.Version=${VERSION}"
 

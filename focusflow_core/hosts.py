@@ -34,7 +34,9 @@ FILE_ATTRIBUTE_READONLY = 0x00000001
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 MAX_WRITE_RETRIES = 5
 WRITE_RETRY_BACKOFF_SECONDS = 0.040
+STATE_RETRY_BACKOFF_SECONDS = 0.025
 WIN32_SHARING_WINERRORS = frozenset({32, 33})
+ALIVE_PID_LEASE_GRACE = datetime.timedelta(minutes=15)
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -174,17 +176,11 @@ def _is_likely_focusflow_sinkhole_line(line: str) -> bool:
     if not t:
         return True
     if t.startswith("#"):
-        lower = t.lower()
-        return any(w in lower for w in ("focusflow", "managed", "sinkhole", "distraction"))
+        return "focusflow" in t.lower()
     parts = t.split()
-    if len(parts) < 2:
+    if len(parts) < 2 or parts[1].startswith("#"):
         return False
-    ip, host = parts[0], parts[1].lower()
-    if ip in ("0.0.0.0", "::"):
-        return True
-    if ip == "127.0.0.1" and host not in ("localhost", "localhost.localdomain"):
-        return True
-    return False
+    return parts[0] in ("0.0.0.0", "::")
 
 
 def strip_managed_blocks(content: str) -> str:
@@ -295,6 +291,62 @@ def read_hosts_bytes_with_retry(hosts_path: str) -> bytes:
     raise last_exc
 
 
+def _has_intact_managed_sinkhole(raw_text: str, clean_domains: list[str]) -> bool:
+    """Verify MarkerBegin strictly precedes MarkerEnd and every domain has active v4+v6+www mappings."""
+    raw_lines = raw_text.split("\n")
+    begin_idx = -1
+    end_idx = -1
+    begin_count = 0
+    end_count = 0
+
+    for idx, raw_line in enumerate(raw_lines):
+        trimmed = (raw_line[:-1] if raw_line.endswith("\r") else raw_line).strip()
+        if trimmed == MARKER_BEGIN:
+            begin_count += 1
+            if begin_idx < 0:
+                begin_idx = idx
+        elif trimmed == MARKER_END:
+            end_count += 1
+            if end_idx < 0:
+                end_idx = idx
+
+    if begin_count != 1 or end_count != 1 or begin_idx < 0 or end_idx <= begin_idx:
+        return False
+
+    v4_active: set[str] = set()
+    v6_active: set[str] = set()
+
+    for raw_line in raw_lines[begin_idx + 1 : end_idx]:
+        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        hash_idx = line.find("#")
+        if hash_idx >= 0:
+            line = line[:hash_idx]
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        ip = parts[0]
+        if ip not in ("0.0.0.0", "::"):
+            continue
+        for host_tok in parts[1:]:
+            host = host_tok.strip().lower()
+            if not host:
+                continue
+            if ip == "0.0.0.0":
+                v4_active.add(host)
+            else:
+                v6_active.add(host)
+
+    for dom in clean_domains:
+        if dom not in v4_active or dom not in v6_active:
+            return False
+        if not dom.startswith("www."):
+            www_dom = f"www.{dom}"
+            if www_dom not in v4_active or www_dom not in v6_active:
+                return False
+
+    return True
+
+
 def _write_atomic_state_bytes(path: str, data: bytes) -> None:
     parent = os.path.dirname(path) or "."
     os.makedirs(parent, exist_ok=True)
@@ -308,7 +360,17 @@ def _write_atomic_state_bytes(path: str, data: bytes) -> None:
             os.chmod(tmp_path, 0o644)
         except OSError:
             pass
-        os.replace(tmp_path, path)
+        last_err: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except OSError as exc:
+                last_err = exc
+                if attempt + 1 < 5:
+                    time.sleep(STATE_RETRY_BACKOFF_SECONDS)
+        if last_err is not None:
+            raise last_err
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -450,13 +512,48 @@ class HostsManager:
         return compute_bytes_sha256(clean_bytes)
 
     def load_journal(self) -> HostsJournal | None:
-        if not os.path.exists(self.journal_path):
-            return None
-        with open(self.journal_path, "r", encoding="utf-8-sig") as f:
-            raw = json.load(f)
-        if not isinstance(raw, dict):
-            raise ValueError("corrupt journal structure")
-        return HostsJournal.from_dict(raw)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with open(self.journal_path, "rb") as f:
+                    raw_bytes = f.read()
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                last_exc = exc
+                if attempt + 1 < 3:
+                    time.sleep(STATE_RETRY_BACKOFF_SECONDS)
+                    continue
+                raise
+
+            clean_bytes = raw_bytes[3:] if raw_bytes.startswith(b"\xef\xbb\xbf") else raw_bytes
+            if not clean_bytes.strip():
+                last_exc = ValueError("empty hosts journal")
+                if attempt + 1 < 3:
+                    time.sleep(STATE_RETRY_BACKOFF_SECONDS)
+                    continue
+                raise last_exc
+
+            try:
+                raw = json.loads(clean_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                last_exc = exc
+                if attempt + 1 < 3:
+                    time.sleep(STATE_RETRY_BACKOFF_SECONDS)
+                    continue
+                raise
+
+            if not isinstance(raw, dict):
+                last_exc = ValueError("corrupt journal structure")
+                if attempt + 1 < 3:
+                    time.sleep(STATE_RETRY_BACKOFF_SECONDS)
+                    continue
+                raise last_exc
+            return HostsJournal.from_dict(raw)
+
+        if last_exc is not None:
+            raise last_exc
+        return None
 
     def _write_journal(self, journal: HostsJournal) -> None:
         payload = (json.dumps(journal.to_dict(), indent=2) + "\n").encode("utf-8")
@@ -544,14 +641,9 @@ class HostsManager:
             return False
 
         raw_text = read_hosts_bytes_with_retry(self.hosts_path).decode("utf-8", errors="surrogateescape")
-        if MARKER_BEGIN not in raw_text or MARKER_END not in raw_text:
+        if not _has_intact_managed_sinkhole(raw_text, clean_domains):
             self.apply_blocklist(clean_domains, meta=meta)
             return True
-
-        for dom in clean_domains:
-            if f"0.0.0.0 {dom}" not in raw_text or f":: {dom}" not in raw_text:
-                self.apply_blocklist(clean_domains, meta=meta)
-                return True
         return False
 
     def _restore_hosts_from_backup_or_strip(self) -> bool:
@@ -635,16 +727,19 @@ class HostsManager:
         if journal is not None:
             orphan_session_id = journal.session_id
             exp_dt = parse_rfc3339(journal.expected_end_at)
-            expired = exp_dt is not None and now_utc > exp_dt
             pid_alive = journal.pid > 0 and is_pid_alive(journal.pid)
 
-            if pid_alive and not expired:
-                return RecoveryResult(
-                    recovered=False,
-                    active_owner_pid=journal.pid,
-                    reason="active_session_alive",
-                )
-            reason = f"owner_pid_{journal.pid}_dead" if not pid_alive else "session_lease_expired"
+            if pid_alive:
+                expired_with_grace = exp_dt is not None and now_utc > (exp_dt + ALIVE_PID_LEASE_GRACE)
+                if not expired_with_grace:
+                    return RecoveryResult(
+                        recovered=False,
+                        active_owner_pid=journal.pid,
+                        reason="active_session_alive",
+                    )
+                reason = "session_lease_expired"
+            else:
+                reason = f"owner_pid_{journal.pid}_dead"
         elif has_corrupt_journal:
             reason = "corrupt_journal"
 

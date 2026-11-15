@@ -149,13 +149,15 @@ func TestStripManagedBlocks_MissingEndMarkerNoCorruption(t *testing.T) {
 		t.Fatalf("truncated current strip got %q, want %q", got, want)
 	}
 
-	// Missing end marker on legacy block followed by custom user entry
-	truncatedLegacyWithUserLine := "127.0.0.1 localhost\r\n\r\n" +
-		LegacyMarkerBegin + "\r\n127.0.0.1 instagram.com\r\n10.20.30.40 internal.corp\r\n"
-	got2 := StripManagedBlocks(truncatedLegacyWithUserLine)
-	want2 := "127.0.0.1 localhost\r\n10.20.30.40 internal.corp\r\n"
+	// Missing end marker followed by custom 127.0.0.1 alias and non-FocusFlow "# ... managed" comment:
+	// neither custom 127.0.0.1 entries nor generic "# ... managed" comments may ever be deleted!
+	truncatedWithCustomUserEntries := "127.0.0.1 localhost\r\n\r\n" +
+		LegacyMarkerBegin + "\r\n# FocusFlow sinkhole header\r\n0.0.0.0 instagram.com\r\n:: instagram.com\r\n" +
+		"# Docker Desktop managed hosts\r\n127.0.0.1 dev.internal\r\n10.20.30.40 internal.corp\r\n"
+	got2 := StripManagedBlocks(truncatedWithCustomUserEntries)
+	want2 := "127.0.0.1 localhost\r\n# Docker Desktop managed hosts\r\n127.0.0.1 dev.internal\r\n10.20.30.40 internal.corp\r\n"
 	if got2 != want2 {
-		t.Fatalf("truncated legacy strip got %q, want %q", got2, want2)
+		t.Fatalf("truncated strip got %q, want %q", got2, want2)
 	}
 }
 
@@ -406,5 +408,135 @@ func TestHostsManager_JournalUTF8BOMTolerance(t *testing.T) {
 	}
 	if j.SessionID != "bom-sess-1" || j.Profile != "dev" {
 		t.Fatalf("unexpected journal parsed from BOM file: %+v", j)
+	}
+}
+
+func TestHostsManager_VerifyOrReapply_AntiTamperBypasses(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	hostsPath := filepath.Join(tmpDir, "hosts")
+	cleanContent := "127.0.0.1 localhost\n"
+	if err := os.WriteFile(hostsPath, []byte(cleanContent), 0644); err != nil {
+		t.Fatalf("write hosts: %v", err)
+	}
+
+	manager := NewHostsManagerWithState(hostsPath, tmpDir)
+	meta := SessionMeta{
+		SessionID:     "tamper-strict-1",
+		PID:           os.Getpid(),
+		StartedAt:     time.Now().UTC(),
+		ExpectedEndAt: time.Now().UTC().Add(30 * time.Minute),
+		Profile:       "hardcore",
+	}
+	domains := []string{"youtube.com"}
+	if err := manager.ApplyBlocklistWithSession(domains, meta); err != nil {
+		t.Fatalf("initial apply: %v", err)
+	}
+
+	tamperCases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "commented_out_v4_entry",
+			content: cleanContent + "\n" + MarkerBegin + "\n" +
+				"# 0.0.0.0 youtube.com\n0.0.0.0 www.youtube.com\n:: youtube.com\n:: www.youtube.com\n" +
+				MarkerEnd + "\n",
+		},
+		{
+			name: "deleted_www_subdomain_entry",
+			content: cleanContent + "\n" + MarkerBegin + "\n" +
+				"0.0.0.0 youtube.com\n:: youtube.com\n:: www.youtube.com\n" +
+				MarkerEnd + "\n",
+		},
+		{
+			name: "deleted_ipv6_www_entry",
+			content: cleanContent + "\n" + MarkerBegin + "\n" +
+				"0.0.0.0 youtube.com\n0.0.0.0 www.youtube.com\n:: youtube.com\n" +
+				MarkerEnd + "\n",
+		},
+		{
+			name: "inverted_markers",
+			content: cleanContent + "\n" + MarkerEnd + "\n" +
+				"0.0.0.0 youtube.com\n0.0.0.0 www.youtube.com\n:: youtube.com\n:: www.youtube.com\n" +
+				MarkerBegin + "\n",
+		},
+		{
+			name: "mappings_outside_empty_managed_block",
+			content: "# 0.0.0.0 youtube.com\n# 0.0.0.0 www.youtube.com\n# :: youtube.com\n# :: www.youtube.com\n" +
+				MarkerBegin + "\n" + MarkerEnd + "\n",
+		},
+	}
+
+	for _, tc := range tamperCases {
+		if err := os.WriteFile(hostsPath, []byte(tc.content), 0644); err != nil {
+			t.Fatalf("%s: write tampered hosts: %v", tc.name, err)
+		}
+		tampered, err := manager.VerifyOrReapply(domains, meta)
+		if err != nil {
+			t.Fatalf("%s: VerifyOrReapply error: %v", tc.name, err)
+		}
+		if !tampered {
+			t.Fatalf("%s: expected tampered=true, got false", tc.name)
+		}
+		if stillTampered, err := manager.VerifyOrReapply(domains, meta); err != nil || stillTampered {
+			t.Fatalf("%s: expected intact block after re-apply, got tampered=%v err=%v", tc.name, stillTampered, err)
+		}
+	}
+}
+
+func TestHostsManager_RecoverIfOrphaned_AlivePIDGraceWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	hostsPath := filepath.Join(tmpDir, "hosts")
+	cleanContent := "127.0.0.1 localhost\n"
+	_ = os.WriteFile(hostsPath, []byte(cleanContent), 0644)
+
+	manager := NewHostsManagerWithState(hostsPath, tmpDir)
+	t0 := time.Now().UTC()
+	leaseEnd := t0.Add(25 * time.Minute)
+	if err := manager.ApplyBlocklistWithSession([]string{"reddit.com"}, SessionMeta{
+		SessionID:     "grace-live-1",
+		PID:           os.Getpid(),
+		StartedAt:     t0,
+		ExpectedEndAt: leaseEnd,
+		Profile:       "hardcore",
+	}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// 5 minutes past ExpectedEndAt (< 15m AlivePIDLeaseGrace) with alive PID must NOT recover
+	resWithinGrace, err := manager.RecoverIfOrphanedAt(leaseEnd.Add(5*time.Minute), nil)
+	if err != nil || resWithinGrace.Recovered || resWithinGrace.Reason != "active_session_alive" {
+		t.Fatalf("expected alive PID within grace window not recovered, got res=%+v err=%v", resWithinGrace, err)
+	}
+
+	// 20 minutes past ExpectedEndAt (> 15m AlivePIDLeaseGrace) recovers stale/recycled PID lease
+	resPastGrace, err := manager.RecoverIfOrphanedAt(leaseEnd.Add(20*time.Minute), nil)
+	if err != nil || !resPastGrace.Recovered || resPastGrace.Reason != "session_lease_expired" {
+		t.Fatalf("expected expired lease past grace window to recover, got res=%+v err=%v", resPastGrace, err)
+	}
+}
+
+func TestBuildPosixElevateSudoArgs_ForwardsFocusFlowHome(t *testing.T) {
+	got := buildPosixElevateSudoArgs("/usr/local/bin/focusflow", []string{"start", "--profile", "dev"}, "/home/alice/.config/focusflow", "/tmp/custom-hosts")
+	want := []string{
+		"env",
+		"FOCUSFLOW_HOME=/home/alice/.config/focusflow",
+		"FOCUSFLOW_HOSTS_PATH=/tmp/custom-hosts",
+		"/usr/local/bin/focusflow",
+		"start",
+		"--profile",
+		"dev",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
 	}
 }

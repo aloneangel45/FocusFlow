@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
 const (
@@ -86,14 +88,19 @@ func IsElevated() bool {
 	return os.Geteuid() == 0
 }
 
-// ElevateSelf re-invokes the current binary via sudo on POSIX platforms.
+// ElevateSelf re-invokes the current binary via sudo on POSIX platforms,
+// forwarding FOCUSFLOW_HOME (and FOCUSFLOW_HOSTS_PATH if set) so the elevated
+// process shares the invoking user's state directory instead of splitting into /root.
 func ElevateSelf(args []string) error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	sudoArgs := append([]string{exePath}, args...)
+	stateDir := storage.GetStateDir()
+	hostsOverride := os.Getenv("FOCUSFLOW_HOSTS_PATH")
+	sudoArgs := buildPosixElevateSudoArgs(exePath, args, stateDir, hostsOverride)
 	cmd := exec.Command("sudo", sudoArgs...)
+	cmd.Env = append(os.Environ(), "FOCUSFLOW_HOME="+stateDir)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

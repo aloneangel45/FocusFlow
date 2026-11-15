@@ -65,6 +65,33 @@ func TestResolveProcFSNames_Linux15ByteCommTruncation(t *testing.T) {
 		t.Fatalf("expected truncated comm to resolve full binary via cmdline, got candidates=%v matched=%q ok=%v",
 			candidates, matched, ok)
 	}
+
+	// Short comm (< 15 chars, e.g. prctl PR_SET_NAME spoofing) must STILL resolve /proc/<pid>/exe unconditionally
+	shortDir := filepath.Join(fakeProc, "67890")
+	if err := os.MkdirAll(shortDir, 0755); err != nil {
+		t.Fatalf("mkdir shortDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(shortDir, "comm"), []byte("worker\n"), 0644); err != nil {
+		t.Fatalf("write short comm: %v", err)
+	}
+	targetBin := filepath.Join(fakeProc, "bash")
+	_ = os.WriteFile(targetBin, []byte("#!/bin/sh\n"), 0755)
+	if err := os.Symlink(targetBin, filepath.Join(shortDir, "exe")); err == nil {
+		shortCands := resolveProcFSNames(fakeProc, "67890")
+		foundBash := false
+		for _, c := range shortCands {
+			if c == "bash" {
+				foundBash = true
+			}
+		}
+		if !foundBash {
+			t.Fatalf("expected unconditional /proc/<pid>/exe resolution for short comm, got %v", shortCands)
+		}
+		supSpoof := NewProcessSupervisor([]string{"worker.exe"})
+		if _, shouldKill := supSpoof.shouldTerminateProcess(67890, shortCands...); shouldKill {
+			t.Fatalf("protected /proc/<pid>/exe target 'bash' must block termination even when comm is spoofed to 'worker'")
+		}
+	}
 }
 
 func TestAntiCheatGuard_IncludesSystemInformer(t *testing.T) {

@@ -466,3 +466,131 @@ func TestCLI_StopAbortsRunningSessionAndConcurrentStartExitsCleanly(t *testing.T
 		}
 	}
 }
+
+func TestCLI_ExportToSessionsJSONDoesNotSelfTruncate(t *testing.T) {
+	stateDir, _ := setupHermeticCLIEnv(t)
+
+	store, err := storage.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.FinalizeSession("exp-1", "dev", 50, true, "completed", 4, now.Add(-50*time.Minute), now); err != nil {
+		t.Fatalf("FinalizeSession: %v", err)
+	}
+
+	sessionsPath := filepath.Join(stateDir, "sessions.json")
+	code, _, errOut := execCLI("export", "--format", "json", "--out", sessionsPath)
+	if code != 0 {
+		t.Fatalf("export --out sessions.json failed: %s", errOut)
+	}
+
+	var exported storage.ExportPayload
+	raw, err := os.ReadFile(sessionsPath)
+	if err != nil {
+		t.Fatalf("read exported file: %v", err)
+	}
+	if err := json.Unmarshal(raw, &exported); err != nil {
+		t.Fatalf("unmarshal exported payload: %v", err)
+	}
+	if len(exported.Sessions) != 1 || exported.Sessions[0].ID != "exp-1" || exported.Summary.TotalMinutes != 50 {
+		t.Fatalf("export --out <sessions.json> self-truncated session history! got: %+v", exported)
+	}
+}
+
+func TestCLI_ReadOnlyCommandsSkipStartupAutoRecovery(t *testing.T) {
+	_, hostsPath := setupHermeticCLIEnv(t)
+
+	store, err := storage.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.StartSession("orphan-ro-1", "hardcore", 25, now.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	hm := engine.NewHostsManager()
+	if err := hm.ApplyBlocklistWithSession([]string{"youtube.com"}, engine.SessionMeta{
+		SessionID:     "orphan-ro-1",
+		PID:           99999999, // Dead PID
+		StartedAt:     now.Add(-10 * time.Minute),
+		ExpectedEndAt: now.Add(15 * time.Minute),
+		Profile:       "hardcore",
+	}); err != nil {
+		t.Fatalf("ApplyBlocklistWithSession: %v", err)
+	}
+
+	for _, roArgs := range [][]string{
+		{"status", "--json"},
+		{"stats", "--json"},
+		{"list", "--json"},
+		{"export", "--format", "json"},
+	} {
+		code, _, errOut := execCLI(roArgs...)
+		if code != 0 {
+			t.Fatalf("read-only command %v failed: %s", roArgs, errOut)
+		}
+		if !hm.IsActive() {
+			t.Fatalf("read-only command %v unexpectedly mutated/rolled back hosts!", roArgs)
+		}
+		if !store.IsSessionRunning("orphan-ro-1") {
+			t.Fatalf("read-only command %v unexpectedly mutated sessions.json status!", roArgs)
+		}
+	}
+
+	// Explicit diagnostic `doctor` command MUST still perform orphan recovery
+	docCode, _, docErr := execCLI("doctor", "--json")
+	if docCode != 0 {
+		t.Fatalf("doctor --json failed: %s", docErr)
+	}
+	rawHosts, _ := os.ReadFile(hostsPath)
+	if engine.HasManagedMarkers(string(rawHosts)) {
+		t.Fatalf("expected doctor to recover orphaned hosts markers")
+	}
+	if store.IsSessionRunning("orphan-ro-1") {
+		t.Fatalf("expected doctor to mark orphan-ro-1 as orphaned")
+	}
+}
+
+func TestCLI_HardcoreMultiCycleBreakRefreshesJournalLease(t *testing.T) {
+	setupHermeticCLIEnv(t)
+
+	hm := engine.NewHostsManager()
+	sigChan := make(chan os.Signal, 1)
+	var outBuf, errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+
+	startedWall := time.Now().UTC()
+	go func() {
+		doneCh <- runStartWithSignals(
+			[]string{"--profile", "hardcore", "--strict", "hardcore", "--seconds", "1", "--cycles", "2", "--break-seconds", "8"},
+			&outBuf,
+			&errBuf,
+			sigChan,
+		)
+	}()
+
+	// Wait until sprint 1 finishes and break begins (process scan + DNS flush takes ~2-3s on Windows)
+	deadline := time.Now().Add(10 * time.Second)
+	refreshed := false
+	for time.Now().Before(deadline) {
+		if j, err := hm.LoadJournal(); err == nil && j != nil {
+			if exp, pErr := time.Parse(time.RFC3339, j.ExpectedEndAt); pErr == nil {
+				// Initial work lease was startedWall + 1s; break refresh pushes ExpectedEndAt out by ~1m08s!
+				if exp.After(startedWall.Add(30 * time.Second)) {
+					refreshed = true
+					break
+				}
+			}
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+
+	sigChan <- os.Interrupt
+	<-doneCh
+
+	if !refreshed {
+		t.Fatalf("expected hardcore break to refresh hosts journal ExpectedEndAt lease! output:\n%s", outBuf.String())
+	}
+}

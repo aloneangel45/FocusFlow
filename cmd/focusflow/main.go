@@ -1092,10 +1092,6 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 		sessionID := storage.GenerateSessionID()
 		lastSessionID = sessionID
 
-		if store != nil {
-			_ = store.StartSession(sessionID, prof.Name, durationMin, startTime)
-		}
-
 		if totalCycles > 1 {
 			_, _ = fmt.Fprintf(stdout, "  [CYCLE %d/%d] [ACTIVE] Starting '%s' sprint (%d min work / %d min break | Strictness: %s | Session: %s)\n",
 				cycle, totalCycles, prof.Name, durationMin, breakMin, strictLevel, sessionID)
@@ -1129,6 +1125,12 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 			if err := hosts.ApplyBlocklistWithSession(allDomains, sessionMeta); err != nil {
 				hostsEngaged = false
 			}
+		}
+
+		// Record the running session AFTER engaging the hosts shield and journal so a concurrent
+		// `focusflow stop` never observes a running session before the journal exists on disk.
+		if store != nil {
+			_ = store.StartSession(sessionID, prof.Name, durationMin, startTime)
 		}
 
 		notifier.NotifySprintStart(prof.Name, durationMin, cycle, totalCycles)
@@ -1176,6 +1178,12 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 				// Detect external stop/abort (e.g. `focusflow stop` or `focusflow recover --force` from another terminal)
 				if store != nil && !store.IsSessionRunning(sessionID) {
 					workTicker.Stop()
+					if hostsEngaged {
+						if j, err := hosts.LoadJournal(); err == nil && j != nil && j.SessionID == sessionID {
+							_ = hosts.Rollback()
+							_ = dns.FlushResolverCache()
+						}
+					}
 					hostsEngaged = false
 					_, _ = fmt.Fprintln(stdout, "\n\n  [INFO] Session externally stopped. Exiting sprint cleanly.")
 					return 0

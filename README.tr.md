@@ -1,4 +1,4 @@
-# FocusFlow v2.2 (Turkce Kullanim ve Mimari Kilavuzu)
+# FocusFlow v2.3 (Turkce Kullanim ve Mimari Kilavuzu)
 
 <p align="center">
   <strong>Cokmeye Karsi Korumali Derin Odaklanma Motoru, Cift Yiginli (IPv4/IPv6) Atomik Hosts Engelleyicisi ve Catppuccin Mocha Masaustu HUD.</strong>
@@ -6,12 +6,18 @@
 
 ---
 
-## FocusFlow v2.2 Mimarisi ve Yenilikler
+## FocusFlow v2.3 Mimarisi ve Yenilikler
 
-FocusFlow v2.2, **Go (yerel CLI motoru)** ve **Python standart kutuphanesi (`focusflow_core` + `FocusFlowGUI.py`, sifir zorunlu harici bagimlilik)** uzerinde tamamen birlestirilmis bir sistem mimarisi sunar:
+FocusFlow v2.3, **Go (yerel CLI motoru)** ve **Python standart kutuphanesi (`focusflow_core` + `FocusFlowGUI.py`, sifir zorunlu harici bagimlilik)** uzerinde tamamen birlestirilmis bir sistem mimarisi sunar:
 
-1. **Ortak Durum, Ozel Profiller ve Gunluk Odak Hedefi:**
-   * Hem Go CLI (`focusflow`) hem de Python masaustu arayuzu (`FocusFlowGUI.py`) ayni durum dizinini (`FOCUSFLOW_HOME` -> Windows'ta `%APPDATA%\FocusFlow`, Linux/macOS'ta `~/.config/focusflow`), ayni `config.json` (ozel isimli profiller + `daily_goal_minutes`), `sessions.json` ve `hosts.focusflow.journal.json` semalarini kullanir.
+1. **Ortak Durum, Ozel Profiller, Otomatik Zamanlama ve Kancalar:**
+   * Hem Go CLI (`focusflow`) hem de Python masaustu arayuzu (`FocusFlowGUI.py`) ayni durum dizinini (`FOCUSFLOW_HOME` -> Windows'ta `%APPDATA%\FocusFlow`, Linux/macOS'ta `~/.config/focusflow`), ayni `config.json` (ozel profiller, `daily_goal_minutes`, `schedules`, `hooks`, `notifications_enabled`), `sessions.json` ve `hosts.focusflow.journal.json` semalarini kayipsiz sekilde paylasir.
+2. **Otomatik Yinelenen Zamanlayici (`focusflow schedule`):**
+   * Hafta ici/hafta sonu veya gece yarisini asan (`22:00`–`02:00`) tekrarlayan odak pencereleri tanimlanir (`schedule add|list|remove|next|run`); arka plan zamanlayicisi pencere basladiginda kalkani otomatik etkinlestirir ve bitiste temizce geri alir.
+3. **90 Gunluk Katki Isi Haritasi (`stats --heatmap` + Masaustu HUD):**
+   * Gunluk odak hedefine gore olceklenen 13 hafta x 7 gunluk GitHub tarzi ANSI isi haritasi (`--no-color` / `NO_COLOR` ile saf ASCII `[ ] [.] [o] [O] [#]` destegi), aktif/en uzun seri hesabi ve Python HUD icinde Catppuccin Mocha isi haritasi paneli sunar.
+4. **Sifir Bagimlilikli Yerel OS Bildirimleri ve Yetki Dusurmeli Yasam Dongusu Kancalari:**
+   * Sprint baslangici, mola ve tamamlanma anlarinda engellemesiz yerel bildirimler (Windows Toast, macOS `osascript`, Linux `notify-send`; `--no-notify` ile kapatilabilir) ve `--on-start`/`--on-end` kabuk kancalari (`10s` zaman asimi, POSIX `sudo` altinda `SUDO_UID`/`SUDO_GID` yetki dusurme korumasi) calistirir.
 2. **Cok Dongulu Pomodoro Motoru (`--cycles` &amp; `--break`):**
    * Tek komutla ardisik calisma/mola donguleri (`focusflow start --cycles 4 --break 5`) yurutulur; her calisma seansi bittiginde aninda `sessions.json` dosyasina kaydedilir ve mola sirasinda `hosts` kalkani gecici olarak kaldirilir (`--strict hardcore` modunda kesintisiz kilit korunur).
 3. **SHA-256 Write-Ahead Journal ve Otomatik Kurtarma (`RecoverIfOrphaned`):**
@@ -53,7 +59,7 @@ python FocusFlowGUI.py --elevate
 ### 3. Komut Satiri Araci (Go CLI)
 Kaynak koddan derleme:
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.2" -o focusflow.exe ./cmd/focusflow
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.3.0" -o focusflow.exe ./cmd/focusflow
 ```
 
 Temel komutlar:
@@ -87,8 +93,15 @@ focusflow list --json
 focusflow add site reddit.com
 focusflow add app steam.exe
 
-# Gercek calisma istatistikleri, gunluk hedef ve 7 gunluk ASCII grafik
+# Otomatik tekrarlayan odak pencereleri ve zamanlayici daemon
+focusflow schedule add --name "Sabah Dev" --days mon-fri --from 09:00 --to 12:00 --profile dev
+focusflow schedule next
+focusflow schedule run --check-interval 30s --elevate
+
+# Gercek calisma istatistikleri, 7 gunluk grafik ve 90 gunluk isi haritasi
 focusflow stats --days 7
+focusflow stats --heatmap
+focusflow stats --heatmap --no-color
 focusflow export --format csv --out rapor.csv
 
 # Sistem tanilama ve cokme sonrasi kurtarma

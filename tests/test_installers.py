@@ -122,7 +122,7 @@ def test_install_ps1_end_to_end_sha256_verification(tmp_path: Path) -> None:
         installed_exe = install_dir / "focusflow.exe"
         assert installed_exe.exists()
         assert "Verified SHA-256" in ok_run.stdout
-        assert "FocusFlow v2.2.2" in ok_run.stdout
+        assert "FocusFlow v2.3.0" in ok_run.stdout
 
         # 1b. UTF-8 BOM in checksums.txt (emitted by PowerShell Set-Content -Encoding UTF8) must also succeed
         bom_dir = tmp_path / "bom_install"

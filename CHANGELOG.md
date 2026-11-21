@@ -2,6 +2,15 @@
 
 All notable changes to FocusFlow are documented in this file.
 
+## [2.3.0] - 2026-11-21
+
+### Added
+- **Automated Recurring Focus Schedules (`pkg/schedule`, `focusflow schedule`):** Added recurring weekday/overnight schedule rules (`schedules` in `config.json`) with `focusflow schedule list|add|remove|next|run [--json]`. Supports day ranges with weekday wrap-around (`mon-fri`, `fri-mon`, `daily`, `weekends`), overnight windows crossing midnight (`22:00`–`02:00`), exact next-window prediction (`schedule next`), and a lightweight daemon runner (`schedule run --check-interval 30s`) that engages and releases focus shields automatically with graceful `SIGINT`/`SIGTERM` rollback.
+- **90-Day Contribution Heatmap (`pkg/tui/heatmap.go`, `focusflow stats --heatmap`, `FocusFlowGUI.py`):** Added a GitHub-style 13-week × 7-day focus intensity heatmap calibrated against `daily_goal_minutes`, displaying month headers, intensity legend, active streak, and longest streak (`longest_streak_days` in Go & Python `AnalyticsSummary`). Automatically degrades to pure ASCII (`[ ] [.] [o] [O] [#]`) under `--no-color` or `NO_COLOR`. Added a native zero-dependency Catppuccin Mocha 90-day heatmap canvas with hover tooltips in the Python desktop HUD.
+- **Zero-Dependency Native OS Desktop Notifications (`pkg/engine/notify*.go`):** Added non-blocking native desktop notifications on sprint start, break start, and session completion (Windows WinRT Toast with WinForms BalloonTip fallback reading env-isolated strings; macOS `osascript` argv-isolated `display notification`; Linux `notify-send` with silent headless fallback). Controlled via `--no-notify`, `notifications_enabled` in `config.json`, or `FOCUSFLOW_NO_NOTIFY=1`.
+- **Privilege-Hardened Lifecycle Hooks (`pkg/engine/hooks*.go`, `--on-start` / `--on-break` / `--on-end`):** Added persistent `hooks` in `config.json` and per-session CLI hook flags exporting `FOCUSFLOW_EVENT`, `FOCUSFLOW_PROFILE`, `FOCUSFLOW_SESSION_ID`, and `FOCUSFLOW_MINUTES` with strict `10s` timeouts and non-fatal warning reporting so failing hooks never abort hosts rollback. On POSIX, elevated `sudo` invocations drop privileges via `SysProcAttr.Credential` (`SUDO_UID`/`SUDO_GID`) before executing hooks, and pure root executions refuse arbitrary hooks unless `--allow-root-hooks` is explicitly passed.
+- **Go <-> Python v2.3.0 `config.json` Round-Trip Sync (`focusflow_core/config.py`, `FocusFlowGUI.py`, `tests/test_v230_features.py`):** Added full schema validation and lossless preservation of `schedules`, `hooks`, and `notifications_enabled` across Go CLI and Python HUD saves, plus a desktop notifications toggle and automation sync status indicator in Tab 5 (`[05] SYSTEM`).
+
 ## [2.2.2] - 2026-11-15
 
 ### Fixed

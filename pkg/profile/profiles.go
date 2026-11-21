@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
+	"github.com/aloneangel45/focusflow/pkg/schedule"
 	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
@@ -47,19 +48,25 @@ type FocusProfile struct {
 }
 
 type ConfigStore struct {
-	CustomDomains    []string                 `json:"custom_domains"`
-	CustomProcesses  []string                 `json:"custom_processes"`
-	DailyGoalMinutes int                      `json:"daily_goal_minutes"`
-	Profiles         map[string]*FocusProfile `json:"profiles"`
+	CustomDomains        []string                 `json:"custom_domains"`
+	CustomProcesses      []string                 `json:"custom_processes"`
+	DailyGoalMinutes     int                      `json:"daily_goal_minutes"`
+	NotificationsEnabled bool                     `json:"notifications_enabled"`
+	Schedules            []schedule.ScheduleRule  `json:"schedules"`
+	Hooks                engine.HooksConfig       `json:"hooks"`
+	Profiles             map[string]*FocusProfile `json:"profiles"`
 }
 
 type rawConfigCompat struct {
-	CustomDomains    []string                 `json:"custom_domains"`
-	CustomProcesses  []string                 `json:"custom_processes"`
-	CustomSites      []string                 `json:"custom_sites"`
-	CustomApps       []string                 `json:"custom_apps"`
-	DailyGoalMinutes int                      `json:"daily_goal_minutes"`
-	Profiles         map[string]*FocusProfile `json:"profiles"`
+	CustomDomains        []string                 `json:"custom_domains"`
+	CustomProcesses      []string                 `json:"custom_processes"`
+	CustomSites          []string                 `json:"custom_sites"`
+	CustomApps           []string                 `json:"custom_apps"`
+	DailyGoalMinutes     int                      `json:"daily_goal_minutes"`
+	NotificationsEnabled *bool                    `json:"notifications_enabled"`
+	Schedules            []schedule.ScheduleRule  `json:"schedules"`
+	Hooks                engine.HooksConfig       `json:"hooks"`
+	Profiles             map[string]*FocusProfile `json:"profiles"`
 }
 
 type CustomProfileInput struct {
@@ -159,10 +166,13 @@ func sanitizeProcessList(procs []string) []string {
 
 func newDefaultConfigStore() *ConfigStore {
 	return &ConfigStore{
-		CustomDomains:    []string{},
-		CustomProcesses:  []string{},
-		DailyGoalMinutes: DefaultDailyGoalMinutes,
-		Profiles:         DefaultProfiles(),
+		CustomDomains:        []string{},
+		CustomProcesses:      []string{},
+		DailyGoalMinutes:     DefaultDailyGoalMinutes,
+		NotificationsEnabled: true,
+		Schedules:            []schedule.ScheduleRule{},
+		Hooks:                engine.HooksConfig{},
+		Profiles:             DefaultProfiles(),
 	}
 }
 
@@ -260,11 +270,23 @@ func LoadConfig() (*ConfigStore, error) {
 		normalizedProfiles[key] = &pCopy
 	}
 
+	notifyEnabled := true
+	if compat.NotificationsEnabled != nil {
+		notifyEnabled = *compat.NotificationsEnabled
+	}
+
 	cfg := &ConfigStore{
-		CustomDomains:    engine.SanitizeDomains(mergedDomains),
-		CustomProcesses:  sanitizeProcessList(mergedProcs),
-		DailyGoalMinutes: NormalizeDailyGoalMinutes(compat.DailyGoalMinutes),
-		Profiles:         normalizedProfiles,
+		CustomDomains:        engine.SanitizeDomains(mergedDomains),
+		CustomProcesses:      sanitizeProcessList(mergedProcs),
+		DailyGoalMinutes:     NormalizeDailyGoalMinutes(compat.DailyGoalMinutes),
+		NotificationsEnabled: notifyEnabled,
+		Schedules:            schedule.SanitizeRules(compat.Schedules),
+		Hooks: engine.HooksConfig{
+			OnStart: strings.TrimSpace(compat.Hooks.OnStart),
+			OnEnd:   strings.TrimSpace(compat.Hooks.OnEnd),
+			OnBreak: strings.TrimSpace(compat.Hooks.OnBreak),
+		},
+		Profiles: normalizedProfiles,
 	}
 
 	if _, ok := cfg.Profiles["dev"]; !ok {
@@ -297,6 +319,10 @@ func SaveConfig(cfg *ConfigStore) error {
 		cfg.CustomProcesses = sanitizeProcessList(cfg.CustomProcesses)
 	}
 	cfg.DailyGoalMinutes = NormalizeDailyGoalMinutes(cfg.DailyGoalMinutes)
+	cfg.Schedules = schedule.SanitizeRules(cfg.Schedules)
+	cfg.Hooks.OnStart = strings.TrimSpace(cfg.Hooks.OnStart)
+	cfg.Hooks.OnEnd = strings.TrimSpace(cfg.Hooks.OnEnd)
+	cfg.Hooks.OnBreak = strings.TrimSpace(cfg.Hooks.OnBreak)
 	if cfg.Profiles == nil {
 		cfg.Profiles = DefaultProfiles()
 	}
@@ -561,6 +587,51 @@ func (cfg *ConfigStore) DeleteCustomProfile(name string) error {
 	}
 	delete(cfg.Profiles, key)
 	return nil
+}
+
+// AddSchedule validates and appends a recurring ScheduleRule to ConfigStore.
+func (cfg *ConfigStore) AddSchedule(rule schedule.ScheduleRule) (schedule.ScheduleRule, error) {
+	clean, err := schedule.ValidateRule(rule)
+	if err != nil {
+		return schedule.ScheduleRule{}, err
+	}
+	if _, ok := cfg.GetProfile(clean.Profile); !ok {
+		return schedule.ScheduleRule{}, fmt.Errorf("%w: %s", ErrProfileNotFound, clean.Profile)
+	}
+	for _, existing := range cfg.Schedules {
+		if strings.EqualFold(existing.Name, clean.Name) {
+			return schedule.ScheduleRule{}, fmt.Errorf("schedule with name %q already exists (id=%s)", existing.Name, existing.ID)
+		}
+		if existing.ID == clean.ID {
+			clean.ID = schedule.GenerateRuleID()
+		}
+	}
+	cfg.Schedules = append(cfg.Schedules, clean)
+	return clean, nil
+}
+
+// RemoveSchedule deletes a recurring ScheduleRule matching either exact ID or case-insensitive Name.
+func (cfg *ConfigStore) RemoveSchedule(nameOrID string) (schedule.ScheduleRule, error) {
+	target := strings.TrimSpace(nameOrID)
+	if target == "" {
+		return schedule.ScheduleRule{}, errors.New("schedule name or id cannot be empty")
+	}
+	updated := make([]schedule.ScheduleRule, 0, len(cfg.Schedules))
+	var removed schedule.ScheduleRule
+	found := false
+	for _, r := range cfg.Schedules {
+		if !found && (r.ID == target || strings.EqualFold(r.Name, target)) {
+			removed = r
+			found = true
+			continue
+		}
+		updated = append(updated, r)
+	}
+	if !found {
+		return schedule.ScheduleRule{}, fmt.Errorf("schedule %q not found", nameOrID)
+	}
+	cfg.Schedules = updated
+	return removed, nil
 }
 
 func LoadOrDefault(name string) *FocusProfile {

@@ -18,24 +18,34 @@ import (
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
 	"github.com/aloneangel45/focusflow/pkg/profile"
+	"github.com/aloneangel45/focusflow/pkg/schedule"
 	"github.com/aloneangel45/focusflow/pkg/storage"
 	"github.com/aloneangel45/focusflow/pkg/tui"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=..."
-var Version = "2.2.2"
+var Version = "2.3.0"
 
 func main() {
 	os.Exit(runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func shouldSkipStartupAutoRecovery(command string) bool {
+func shouldSkipStartupAutoRecovery(command string, subArgs []string) bool {
 	switch command {
 	case "version", "--version", "-v",
 		"help", "--help", "-h",
 		"doctor", "recover", "stop",
 		"status", "stats", "list", "export":
 		return true
+	case "schedule", "schedules":
+		if len(subArgs) == 0 {
+			return true
+		}
+		switch strings.ToLower(strings.TrimSpace(subArgs[0])) {
+		case "list", "ls", "next":
+			return true
+		}
+		return false
 	default:
 		return false
 	}
@@ -84,7 +94,7 @@ func runCLI(rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	// Run automatic orphan journal recovery before mutating session/config commands,
 	// skipping purely read-only and explicit lifecycle/diagnostic commands.
-	if !shouldSkipStartupAutoRecovery(command) {
+	if !shouldSkipStartupAutoRecovery(command, subArgs) {
 		_, _ = runStartupAutoRecovery()
 	}
 
@@ -111,6 +121,8 @@ func runCLI(rawArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return handleListConfig(subArgs, stdout, stderr)
 	case "profile", "profiles":
 		return handleProfile(subArgs, stdout, stderr)
+	case "schedule", "schedules":
+		return handleSchedule(subArgs, stdout, stderr)
 	case "goal":
 		return handleGoal(subArgs, stdout, stderr)
 	case "add":
@@ -140,13 +152,14 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  stop                            Rollback hosts file and restore unrestricted access")
 	_, _ = fmt.Fprintln(w, "  status [--json]                 Inspect shield state, daily goal, and active journal")
 	_, _ = fmt.Fprintln(w, "  profile <list|show|create|delete> Manage built-in and custom focus profiles")
+	_, _ = fmt.Fprintln(w, "  schedule <list|add|remove|next|run> Automate recurring focus windows")
 	_, _ = fmt.Fprintln(w, "  goal [--minutes <n>] [--json]   View or set daily focus goal (5..1440 min)")
 	_, _ = fmt.Fprintln(w, "  list [--json]                   List all active profiles, custom blocked sites & apps")
 	_, _ = fmt.Fprintln(w, "  add site <domain>               Add validated RFC-1123 custom domain to blocklist")
 	_, _ = fmt.Fprintln(w, "  add app <proc.exe>              Add custom process to blocklist (denylist protected)")
 	_, _ = fmt.Fprintln(w, "  remove site <domain>            Remove custom domain from blocklist")
 	_, _ = fmt.Fprintln(w, "  remove app <proc.exe>           Remove custom process from blocklist")
-	_, _ = fmt.Fprintln(w, "  stats [--days 7] [--json]       Display focus metrics, daily goal, streak & chart")
+	_, _ = fmt.Fprintln(w, "  stats [--days 7] [--heatmap]    Display metrics, daily goal, streak, chart or 90d heatmap")
 	_, _ = fmt.Fprintln(w, "  export [--format json|csv]      Export session telemetry (--out <file>)")
 	_, _ = fmt.Fprintln(w, "  doctor [--json]                 Audit privileges, hosts integrity, and journal health")
 	_, _ = fmt.Fprintln(w, "  recover [--force] [--json]      Recover orphaned crash/reboot hosts state")
@@ -159,6 +172,11 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  --cycles <n>                    Number of Pomodoro sprints (1..24, default: 1)")
 	_, _ = fmt.Fprintln(w, "  --break <min>                   Break minutes between cycles (0..120, default: profile default)")
 	_, _ = fmt.Fprintln(w, "  --strict <level>                Strictness: relaxed, standard, hardcore (default: standard)")
+	_, _ = fmt.Fprintln(w, "  --no-notify                     Disable native OS desktop notifications")
+	_, _ = fmt.Fprintln(w, "  --on-start <cmd>                Lifecycle hook executed on sprint start")
+	_, _ = fmt.Fprintln(w, "  --on-break <cmd>                Lifecycle hook executed on break start")
+	_, _ = fmt.Fprintln(w, "  --on-end <cmd>                  Lifecycle hook executed after session end/rollback")
+	_, _ = fmt.Fprintln(w, "  --allow-root-hooks              Explicitly permit hooks under pure root (no SUDO_UID)")
 }
 
 func shieldModeString(elevated bool) string {
@@ -241,12 +259,15 @@ func handleInteractiveMenu(stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 type listJSONOutput struct {
-	ConfigPath       string                           `json:"config_path"`
-	StateDir         string                           `json:"state_dir"`
-	DailyGoalMinutes int                              `json:"daily_goal_minutes"`
-	CustomDomains    []string                         `json:"custom_domains"`
-	CustomProcesses  []string                         `json:"custom_processes"`
-	Profiles         map[string]*profile.FocusProfile `json:"profiles"`
+	ConfigPath           string                           `json:"config_path"`
+	StateDir             string                           `json:"state_dir"`
+	DailyGoalMinutes     int                              `json:"daily_goal_minutes"`
+	NotificationsEnabled bool                             `json:"notifications_enabled"`
+	CustomDomains        []string                         `json:"custom_domains"`
+	CustomProcesses      []string                         `json:"custom_processes"`
+	Schedules            []schedule.ScheduleRule          `json:"schedules"`
+	Hooks                engine.HooksConfig               `json:"hooks"`
+	Profiles             map[string]*profile.FocusProfile `json:"profiles"`
 }
 
 func handleListConfig(args []string, stdout, stderr io.Writer) int {
@@ -270,12 +291,15 @@ func handleListConfig(args []string, stdout, stderr io.Writer) int {
 
 	if *asJSON {
 		out := listJSONOutput{
-			ConfigPath:       profile.GetConfigPath(),
-			StateDir:         profile.GetConfigDir(),
-			DailyGoalMinutes: cfg.DailyGoalMinutes,
-			CustomDomains:    cfg.CustomDomains,
-			CustomProcesses:  cfg.CustomProcesses,
-			Profiles:         cfg.Profiles,
+			ConfigPath:           profile.GetConfigPath(),
+			StateDir:             profile.GetConfigDir(),
+			DailyGoalMinutes:     cfg.DailyGoalMinutes,
+			NotificationsEnabled: cfg.NotificationsEnabled,
+			CustomDomains:        cfg.CustomDomains,
+			CustomProcesses:      cfg.CustomProcesses,
+			Schedules:            cfg.Schedules,
+			Hooks:                cfg.Hooks,
+			Profiles:             cfg.Profiles,
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -941,6 +965,11 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	breakFlag := fs.Int("break", -1, "Break duration in minutes between cycles (0..120)")
 	breakSecondsOverride := fs.Int("break-seconds", 0, "Break duration override in seconds (for rapid testing)")
 	strictness := fs.String("strict", "", "Strictness level: relaxed, standard, hardcore")
+	noNotify := fs.Bool("no-notify", false, "Disable native OS desktop notifications for this session")
+	onStartCmd := fs.String("on-start", "", "Lifecycle hook command executed on sprint start")
+	onBreakCmd := fs.String("on-break", "", "Lifecycle hook command executed on break start")
+	onEndCmd := fs.String("on-end", "", "Lifecycle hook command executed after session end/rollback")
+	allowRootHooks := fs.Bool("allow-root-hooks", false, "Allow running hooks as pure root when SUDO_UID is absent")
 	posArgs, err := parseInterspersedFlags(fs, args)
 	if err != nil {
 		return 1
@@ -1028,6 +1057,23 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	tui.PrintBannerTo(stdout, Version)
 
 	totalCycles := *cycles
+	cfg, _ := profile.LoadConfig()
+	notifyEnabled := true
+	var cfgHooks engine.HooksConfig
+	if cfg != nil {
+		notifyEnabled = cfg.NotificationsEnabled
+		cfgHooks = cfg.Hooks
+	}
+	if *noNotify {
+		notifyEnabled = false
+	}
+	notifier := engine.NewNotifier(notifyEnabled)
+	effHooks := engine.ResolveEffectiveHooks(cfgHooks, *onStartCmd, *onBreakCmd, *onEndCmd)
+	hookOpts := engine.HookOptions{
+		Timeout:        engine.DefaultHookTimeout,
+		AllowRootHooks: *allowRootHooks,
+	}
+
 	store, _ := storage.NewStore()
 	hosts := engine.NewHostsManager()
 	dns := &engine.DnsEngine{}
@@ -1038,11 +1084,13 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 	allDomains = append(allDomains, dns.GetDoHBypassDomains()...)
 
 	hostsEngaged := false
+	lastSessionID := ""
 
 	for cycle := 1; cycle <= totalCycles; cycle++ {
 		startTime := time.Now().UTC()
 		expectedEnd := startTime.Add(time.Duration(workSeconds) * time.Second)
 		sessionID := storage.GenerateSessionID()
+		lastSessionID = sessionID
 
 		if store != nil {
 			_ = store.StartSession(sessionID, prof.Name, durationMin, startTime)
@@ -1083,6 +1131,14 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 			}
 		}
 
+		notifier.NotifySprintStart(prof.Name, durationMin, cycle, totalCycles)
+		engine.RunHookSafe(effHooks.OnStart, engine.HookContext{
+			Event:     engine.HookEventStart,
+			Profile:   prof.Name,
+			SessionID: sessionID,
+			Minutes:   durationMin,
+		}, hookOpts, stderr)
+
 		cycleBlocked := 0
 		workTicker := time.NewTicker(1 * time.Second)
 		deadline := time.Now().Add(time.Duration(workSeconds) * time.Second)
@@ -1106,6 +1162,12 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 				if store != nil {
 					_ = store.FinalizeSession(sessionID, prof.Name, elapsed/60, false, "aborted", cycleBlocked, startTime, time.Now().UTC())
 				}
+				engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+					Event:     engine.HookEventEnd,
+					Profile:   prof.Name,
+					SessionID: sessionID,
+					Minutes:   elapsed / 60,
+				}, hookOpts, stderr)
 				_, _ = fmt.Fprintln(stdout, "  [OK] Hosts cleanly restored; session recorded as aborted.")
 				return 130
 
@@ -1187,6 +1249,14 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 					cycle, totalCycles, breakMin)
 			}
 
+			notifier.NotifyBreakStart(breakMin, cycle, totalCycles)
+			engine.RunHookSafe(effHooks.OnBreak, engine.HookContext{
+				Event:     engine.HookEventBreak,
+				Profile:   prof.Name,
+				SessionID: sessionID,
+				Minutes:   breakMin,
+			}, hookOpts, stderr)
+
 			breakTicker := time.NewTicker(1 * time.Second)
 			breakDeadline := time.Now().Add(time.Duration(breakSeconds) * time.Second)
 			breakTicks := 0
@@ -1202,6 +1272,12 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 						_ = dns.FlushResolverCache()
 						hostsEngaged = false
 					}
+					engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+						Event:     engine.HookEventEnd,
+						Profile:   prof.Name,
+						SessionID: sessionID,
+						Minutes:   cycle * durationMin,
+					}, hookOpts, stderr)
 					_, _ = fmt.Fprintln(stdout, "  [OK] Break interrupted; completed sprints preserved and hosts restored.")
 					return 130
 
@@ -1251,6 +1327,13 @@ func runStartWithSignals(args []string, stdout, stderr io.Writer, sigChan <-chan
 		_ = hosts.Rollback()
 		_ = dns.FlushResolverCache()
 	}
+	notifier.NotifySessionComplete(prof.Name, totalCycles, totalCycles*durationMin)
+	engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+		Event:     engine.HookEventEnd,
+		Profile:   prof.Name,
+		SessionID: lastSessionID,
+		Minutes:   totalCycles * durationMin,
+	}, hookOpts, stderr)
 	_, _ = fmt.Fprintln(stdout, "  [OK] All system protections rolled back cleanly.")
 	return 0
 }
@@ -1431,15 +1514,28 @@ func handleFlush(args []string, stdout, stderr io.Writer) int {
 func handleStats(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	days := fs.Int("days", 7, "Number of days for historical bar chart")
+	days := fs.Int("days", 7, "Number of days for historical bar chart or heatmap")
+	heatmap := fs.Bool("heatmap", false, "Render 90-day GitHub-style focus contribution heatmap")
+	noColor := fs.Bool("no-color", false, "Disable ANSI colors (ASCII fallback)")
 	asJSON := fs.Bool("json", false, "Output statistics as JSON")
 	posArgs, err := parseInterspersedFlags(fs, args)
 	if err != nil {
 		return 1
 	}
 	if len(posArgs) > 0 {
-		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow stats [--days <n>] [--json]\n", posArgs[0])
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow stats [--days <n>] [--heatmap] [--no-color] [--json]\n", posArgs[0])
 		return 1
+	}
+
+	daysVisited := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "days" {
+			daysVisited = true
+		}
+	})
+	effectiveDays := *days
+	if *heatmap && !daysVisited {
+		effectiveDays = tui.DefaultHeatmapDays
 	}
 
 	store, err := storage.NewStore()
@@ -1453,7 +1549,8 @@ func handleStats(args []string, stdout, stderr io.Writer) int {
 		goalMinutes = cfg.DailyGoalMinutes
 	}
 
-	summary, err := store.ComputeAnalyticsWithGoal(*days, goalMinutes, time.Now())
+	now := time.Now()
+	summary, err := store.ComputeAnalyticsWithGoal(effectiveDays, goalMinutes, now)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "[ERR] Could not compute stats: %v\n", err)
 		return 1
@@ -1473,10 +1570,22 @@ func handleStats(args []string, stdout, stderr io.Writer) int {
 		summary.CompletedSprints, summary.AttemptedSprints, summary.CompletionRate)
 	_, _ = fmt.Fprintf(stdout, "    - Deep Work Total:     %.1f hrs (%d min)\n",
 		summary.TotalHours, summary.TotalMinutes)
-	_, _ = fmt.Fprintf(stdout, "    - Active Streak:       %d days\n", summary.ActiveStreakDays)
+	_, _ = fmt.Fprintf(stdout, "    - Active Streak:       %d days (Longest: %d days)\n",
+		summary.ActiveStreakDays, summary.LongestStreakDays)
 	_, _ = fmt.Fprintf(stdout, "    - Distractions Killed: %d\n\n", summary.TotalBlocked)
-	_, _ = fmt.Fprintf(stdout, "  Last %d Days Focus Chart:\n", len(summary.Daily))
-	_, _ = fmt.Fprint(stdout, tui.FormatDailyChart(summary.Daily))
+	if *heatmap {
+		_, _ = fmt.Fprint(stdout, tui.FormatHeatmap(
+			summary.Daily,
+			summary.DailyGoalMinutes,
+			summary.ActiveStreakDays,
+			summary.LongestStreakDays,
+			now,
+			tui.ShouldUseColor(*noColor),
+		))
+	} else {
+		_, _ = fmt.Fprintf(stdout, "  Last %d Days Focus Chart:\n", len(summary.Daily))
+		_, _ = fmt.Fprint(stdout, tui.FormatDailyChart(summary.Daily))
+	}
 	return 0
 }
 
@@ -1740,4 +1849,474 @@ func handleRecover(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stdout, "[OK] No orphaned hosts state detected (%s)\n", res.Reason)
 	}
 	return 0
+}
+
+type scheduleWindowJSON struct {
+	RuleID           string `json:"rule_id"`
+	Name             string `json:"name"`
+	Profile          string `json:"profile"`
+	Start            string `json:"start"`
+	End              string `json:"end"`
+	StartsInSeconds  int64  `json:"starts_in_seconds,omitempty"`
+	RemainingSeconds int64  `json:"remaining_seconds,omitempty"`
+}
+
+type scheduleNextJSONOutput struct {
+	Now    string              `json:"now"`
+	Active *scheduleWindowJSON `json:"active,omitempty"`
+	Next   *scheduleWindowJSON `json:"next,omitempty"`
+}
+
+func handleSchedule(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(stderr, "Usage: focusflow schedule <list|add|remove|next|run> [options]")
+		return 1
+	}
+
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	rest := args[1:]
+
+	switch sub {
+	case "list", "ls":
+		fs := flag.NewFlagSet("schedule list", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		asJSON := fs.Bool("json", false, "Output schedules as JSON")
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
+			return 1
+		}
+		if len(posArgs) > 0 {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow schedule list [--json]\n", posArgs[0])
+			return 1
+		}
+		cfg, err := profile.LoadConfig()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error reading config: %v\n", err)
+			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"schedules": cfg.Schedules})
+			return 0
+		}
+		_, _ = fmt.Fprintln(stdout, "  [SCHEDULES] Automated Recurring Focus Windows")
+		if len(cfg.Schedules) == 0 {
+			_, _ = fmt.Fprintln(stdout, "    (None. Use 'focusflow schedule add --name ... --days mon-fri --from 09:00 --to 12:00 --profile dev')")
+			return 0
+		}
+		for _, r := range cfg.Schedules {
+			state := "ENABLED"
+			if !r.Enabled {
+				state = "DISABLED"
+			}
+			_, _ = fmt.Fprintf(stdout, "    - [%s] %-12s | %-20s | %-27s | %s-%s | profile=%s\n",
+				state, r.ID, r.Name, strings.Join(r.Days, ","), r.StartTime, r.EndTime, r.Profile)
+		}
+		return 0
+
+	case "add", "create":
+		fs := flag.NewFlagSet("schedule add", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		name := fs.String("name", "", "Schedule name")
+		daysSpec := fs.String("days", "", "Days (e.g. mon-fri, mon,wed,fri, daily, weekends)")
+		fromTime := fs.String("from", "", "Start time in 24h HH:MM format")
+		toTime := fs.String("to", "", "End time in 24h HH:MM format (overnight supported)")
+		profName := fs.String("profile", "study", "Focus profile name")
+		disabled := fs.Bool("disabled", false, "Create schedule in disabled state")
+		asJSON := fs.Bool("json", false, "Output created schedule as JSON")
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
+			return 1
+		}
+		if len(posArgs) > 0 {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow schedule add --name <name> --days <spec> --from HH:MM --to HH:MM --profile <name> [--json]\n", posArgs[0])
+			return 1
+		}
+		days, err := schedule.ParseDays(*daysSpec)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Invalid --days %q: %v\n", *daysSpec, err)
+			return 1
+		}
+		cfg, err := profile.LoadConfig()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error reading config: %v\n", err)
+			return 1
+		}
+		rule, err := cfg.AddSchedule(schedule.ScheduleRule{
+			Name:      *name,
+			Days:      days,
+			StartTime: *fromTime,
+			EndTime:   *toTime,
+			Profile:   *profName,
+			Enabled:   !*disabled,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot add schedule: %v\n", err)
+			return 1
+		}
+		if err := profile.SaveConfig(cfg); err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
+			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"added": true, "schedule": rule})
+			return 0
+		}
+		_, _ = fmt.Fprintf(stdout, "[OK] Added schedule '%s' (%s) [%s %s-%s | profile=%s].\n",
+			rule.Name, rule.ID, strings.Join(rule.Days, ","), rule.StartTime, rule.EndTime, rule.Profile)
+		return 0
+
+	case "remove", "rm", "delete":
+		fs := flag.NewFlagSet("schedule remove", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		asJSON := fs.Bool("json", false, "Output removal result as JSON")
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
+			return 1
+		}
+		if len(posArgs) != 1 {
+			_, _ = fmt.Fprintln(stderr, "Usage: focusflow schedule remove <name-or-id> [--json]")
+			return 1
+		}
+		cfg, err := profile.LoadConfig()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error reading config: %v\n", err)
+			return 1
+		}
+		removed, err := cfg.RemoveSchedule(posArgs[0])
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Cannot remove schedule: %v\n", err)
+			return 1
+		}
+		if err := profile.SaveConfig(cfg); err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error saving config: %v\n", err)
+			return 1
+		}
+		if *asJSON {
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(map[string]any{"removed": true, "schedule": removed})
+			return 0
+		}
+		_, _ = fmt.Fprintf(stdout, "[OK] Removed schedule '%s' (%s).\n", removed.Name, removed.ID)
+		return 0
+
+	case "next":
+		fs := flag.NewFlagSet("schedule next", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		asJSON := fs.Bool("json", false, "Output next scheduled window as JSON")
+		posArgs, err := parseInterspersedFlags(fs, rest)
+		if err != nil {
+			return 1
+		}
+		if len(posArgs) > 0 {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow schedule next [--json]\n", posArgs[0])
+			return 1
+		}
+		cfg, err := profile.LoadConfig()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "[ERR] Error reading config: %v\n", err)
+			return 1
+		}
+		now := time.Now()
+		active := schedule.ActiveWindow(cfg.Schedules, now)
+		next := schedule.NextWindow(cfg.Schedules, now)
+
+		if *asJSON {
+			out := scheduleNextJSONOutput{
+				Now: now.Format(time.RFC3339),
+			}
+			if active != nil {
+				remSec := int64(active.End.Sub(now).Seconds())
+				if remSec < 0 {
+					remSec = 0
+				}
+				out.Active = &scheduleWindowJSON{
+					RuleID:           active.Rule.ID,
+					Name:             active.Rule.Name,
+					Profile:          active.Rule.Profile,
+					Start:            active.Start.Format(time.RFC3339),
+					End:              active.End.Format(time.RFC3339),
+					RemainingSeconds: remSec,
+				}
+			}
+			if next != nil {
+				startsIn := int64(next.Start.Sub(now).Seconds())
+				if startsIn < 0 {
+					startsIn = 0
+				}
+				out.Next = &scheduleWindowJSON{
+					RuleID:          next.Rule.ID,
+					Name:            next.Rule.Name,
+					Profile:         next.Rule.Profile,
+					Start:           next.Start.Format(time.RFC3339),
+					End:             next.End.Format(time.RFC3339),
+					StartsInSeconds: startsIn,
+				}
+			}
+			enc := json.NewEncoder(stdout)
+			enc.SetIndent("", "  ")
+			_ = enc.Encode(out)
+			return 0
+		}
+
+		if active != nil {
+			_, _ = fmt.Fprintf(stdout, "  [ACTIVE NOW] '%s' (profile=%s) | %s -> %s (%s remaining)\n",
+				active.Rule.Name,
+				active.Rule.Profile,
+				active.Start.Format("Mon 2006-01-02 15:04"),
+				active.End.Format("Mon 2006-01-02 15:04"),
+				schedule.FormatDurationShort(active.End.Sub(now)),
+			)
+		}
+		if next == nil {
+			_, _ = fmt.Fprintln(stdout, "  [SCHEDULE] No upcoming enabled focus windows configured.")
+			return 0
+		}
+		_, _ = fmt.Fprintf(stdout, "  [NEXT] '%s' (profile=%s) | %s -> %s (starts in %s)\n",
+			next.Rule.Name,
+			next.Rule.Profile,
+			next.Start.Format("Mon 2006-01-02 15:04"),
+			next.End.Format("Mon 2006-01-02 15:04"),
+			schedule.FormatDurationShort(next.Start.Sub(now)),
+		)
+		return 0
+
+	case "run", "daemon":
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(sigChan)
+		return runScheduleDaemonWithSignals(rest, stdout, stderr, sigChan, time.Now)
+
+	default:
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unknown schedule subcommand %q. Expected list, add, remove, next, or run.\n", sub)
+		return 1
+	}
+}
+
+func runScheduleDaemonWithSignals(
+	args []string,
+	stdout, stderr io.Writer,
+	sigChan <-chan os.Signal,
+	nowFn func() time.Time,
+) int {
+	fs := flag.NewFlagSet("schedule run", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	checkIntervalStr := fs.String("check-interval", "30s", "Polling interval for schedule windows (e.g. 30s, 1m)")
+	strictness := fs.String("strict", "", "Strictness level override: relaxed, standard, hardcore")
+	noNotify := fs.Bool("no-notify", false, "Disable native OS desktop notifications")
+	onStartCmd := fs.String("on-start", "", "Lifecycle hook command executed on scheduled window start")
+	onBreakCmd := fs.String("on-break", "", "Lifecycle hook command executed on break")
+	onEndCmd := fs.String("on-end", "", "Lifecycle hook command executed on scheduled window end")
+	allowRootHooks := fs.Bool("allow-root-hooks", false, "Allow running hooks as pure root when SUDO_UID is absent")
+	posArgs, err := parseInterspersedFlags(fs, args)
+	if err != nil {
+		return 1
+	}
+	if len(posArgs) > 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Unexpected argument %q. Usage: focusflow schedule run [--check-interval 30s]\n", posArgs[0])
+		return 1
+	}
+
+	checkInterval, err := time.ParseDuration(strings.TrimSpace(*checkIntervalStr))
+	if err != nil || checkInterval <= 0 {
+		_, _ = fmt.Fprintf(stderr, "[ERR] Invalid --check-interval %q (expected positive duration like 30s).\n", *checkIntervalStr)
+		return 1
+	}
+
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+
+	_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] FocusFlow scheduler daemon started (check-interval=%s | %s). Press Ctrl+C to stop.\n",
+		checkInterval, shieldModeString(engine.IsElevated()))
+
+	handledWindows := make(map[string]bool)
+	store, _ := storage.NewStore()
+	hosts := engine.NewHostsManager()
+	dns := &engine.DnsEngine{}
+	hookOpts := engine.HookOptions{
+		Timeout:        engine.DefaultHookTimeout,
+		AllowRootHooks: *allowRootHooks,
+	}
+
+	runWindow := func(win *schedule.Window, cfg *profile.ConfigStore) (interrupted bool) {
+		now := nowFn()
+		remTotal := win.End.Sub(now)
+		if remTotal <= 0 {
+			return false
+		}
+		plannedMin := int((win.End.Sub(win.Start) + time.Second*30) / time.Minute)
+		if plannedMin < 1 {
+			plannedMin = 1
+		}
+
+		prof := profile.LoadOrDefault(win.Rule.Profile)
+		strictLevel := engine.StrictnessStandard
+		if prof.Name == "hardcore" && strings.TrimSpace(*strictness) == "" {
+			strictLevel = engine.StrictnessHardcore
+		}
+		if strings.TrimSpace(*strictness) != "" {
+			switch strings.ToLower(strings.TrimSpace(*strictness)) {
+			case "hardcore":
+				strictLevel = engine.StrictnessHardcore
+			case "relaxed":
+				strictLevel = engine.StrictnessRelaxed
+			case "standard":
+				strictLevel = engine.StrictnessStandard
+			}
+		}
+
+		notifyEnabled := cfg.NotificationsEnabled && !*noNotify
+		notifier := engine.NewNotifier(notifyEnabled)
+		effHooks := engine.ResolveEffectiveHooks(cfg.Hooks, *onStartCmd, *onBreakCmd, *onEndCmd)
+
+		procSup := engine.NewProcessSupervisor(prof.BlockedProcesses)
+		antiCheat := engine.NewAntiCheatGuard(strictLevel)
+		allDomains := append([]string{}, prof.BlockedDomains...)
+		allDomains = append(allDomains, dns.GetDoHBypassDomains()...)
+
+		startUTC := now.UTC()
+		sessionID := storage.GenerateSessionID()
+		if store != nil {
+			_ = store.StartSession(sessionID, prof.Name, plannedMin, startUTC)
+		}
+
+		_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Entering window '%s' (profile=%s | until %s | session=%s)\n",
+			win.Rule.Name, prof.Name, win.End.Format("15:04"), sessionID)
+
+		sessionMeta := engine.SessionMeta{
+			SessionID:     sessionID,
+			PID:           os.Getpid(),
+			StartedAt:     startUTC,
+			ExpectedEndAt: win.End.UTC(),
+			Profile:       prof.Name,
+		}
+		hostsEngaged := false
+		if err := hosts.ApplyBlocklistWithSession(allDomains, sessionMeta); err == nil {
+			hostsEngaged = true
+			_ = dns.FlushResolverCache()
+		}
+
+		notifier.NotifySprintStart(prof.Name, plannedMin, 1, 1)
+		engine.RunHookSafe(effHooks.OnStart, engine.HookContext{
+			Event:     engine.HookEventStart,
+			Profile:   prof.Name,
+			SessionID: sessionID,
+			Minutes:   plannedMin,
+		}, hookOpts, stderr)
+
+		enforceStep := time.Second
+		if checkInterval < enforceStep {
+			enforceStep = checkInterval
+		}
+		enforceTicker := time.NewTicker(enforceStep)
+		defer enforceTicker.Stop()
+
+		blockedCount := 0
+		tickCount := 0
+
+		for {
+			select {
+			case <-sigChan:
+				if hostsEngaged {
+					_ = hosts.Rollback()
+					_ = dns.FlushResolverCache()
+				}
+				elapsedMin := int(nowFn().UTC().Sub(startUTC).Minutes())
+				if elapsedMin < 0 {
+					elapsedMin = 0
+				}
+				if store != nil {
+					_ = store.FinalizeSession(sessionID, prof.Name, elapsedMin, false, "aborted", blockedCount, startUTC, nowFn().UTC())
+				}
+				engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+					Event:     engine.HookEventEnd,
+					Profile:   prof.Name,
+					SessionID: sessionID,
+					Minutes:   elapsedMin,
+				}, hookOpts, stderr)
+				_, _ = fmt.Fprintln(stdout, "  [OK] Scheduler stopped gracefully; active window rolled back.")
+				return true
+
+			case <-enforceTicker.C:
+				tickCount++
+				if store != nil && !store.IsSessionRunning(sessionID) {
+					_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Window '%s' stopped externally.\n", win.Rule.Name)
+					return false
+				}
+
+				cur := nowFn()
+				if !cur.Before(win.End) {
+					if hostsEngaged {
+						_ = hosts.Rollback()
+						_ = dns.FlushResolverCache()
+					}
+					if store != nil {
+						_ = store.FinalizeSession(sessionID, prof.Name, plannedMin, true, "completed", blockedCount, startUTC, cur.UTC())
+					}
+					notifier.NotifySessionComplete(prof.Name, 1, plannedMin)
+					engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+						Event:     engine.HookEventEnd,
+						Profile:   prof.Name,
+						SessionID: sessionID,
+						Minutes:   plannedMin,
+					}, hookOpts, stderr)
+					_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Window '%s' complete; shield released cleanly.\n", win.Rule.Name)
+					return false
+				}
+
+				killed := procSup.ScanAndTerminate()
+				acKilled := antiCheat.Enforce()
+				blockedCount += len(killed) + len(acKilled)
+
+				if hostsEngaged && (strictLevel == engine.StrictnessStandard || strictLevel == engine.StrictnessHardcore) && tickCount%5 == 0 {
+					if tampered, err := hosts.VerifyOrReapply(allDomains, sessionMeta); err == nil && tampered {
+						blockedCount++
+						dns.FlushResolverCacheAsync()
+					}
+				}
+			}
+		}
+	}
+
+	checkOnce := func() (interrupted bool) {
+		cfg, err := profile.LoadConfig()
+		if err != nil {
+			return false
+		}
+		now := nowFn()
+		win := schedule.ActiveWindow(cfg.Schedules, now)
+		if win == nil {
+			return false
+		}
+		winKey := win.Rule.ID + "@" + win.Start.Format(time.RFC3339)
+		if handledWindows[winKey] {
+			return false
+		}
+		handledWindows[winKey] = true
+		return runWindow(win, cfg)
+	}
+
+	if checkOnce() {
+		return 0
+	}
+
+	pollTicker := time.NewTicker(checkInterval)
+	defer pollTicker.Stop()
+
+	for {
+		select {
+		case <-sigChan:
+			_, _ = fmt.Fprintln(stdout, "  [OK] Scheduler stopped gracefully.")
+			return 0
+		case <-pollTicker.C:
+			if checkOnce() {
+				return 0
+			}
+		}
+	}
 }

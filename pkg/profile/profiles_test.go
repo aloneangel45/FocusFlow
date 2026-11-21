@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
+	"github.com/aloneangel45/focusflow/pkg/schedule"
 )
 
 func TestProfiles_DefaultsAndHermeticConfig(t *testing.T) {
@@ -240,5 +241,57 @@ func TestProfiles_UTF8BOMZeroByteAndCorruptBackupRecovery(t *testing.T) {
 	}
 	if string(bakBytes) != corruptRaw {
 		t.Errorf("corrupt backup = %q, want %q", string(bakBytes), corruptRaw)
+	}
+}
+
+func TestProfiles_V230SchemaNotificationsSchedulesAndHooks(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+
+	// Legacy v2.2 config omitting notifications_enabled defaults to true
+	legacyRaw := `{"daily_goal_minutes": 150, "custom_domains": ["reddit.com"]}`
+	if err := os.WriteFile(GetConfigPath(), []byte(legacyRaw), 0644); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.NotificationsEnabled {
+		t.Errorf("expected omitted notifications_enabled to default to true")
+	}
+
+	// Explicitly disable notifications, add schedule & hooks, verify round-trip
+	cfg.NotificationsEnabled = false
+	cfg.Hooks = engine.HooksConfig{
+		OnStart: "echo start",
+		OnEnd:   "echo end",
+	}
+	if _, err := cfg.AddSchedule(schedule.ScheduleRule{
+		Name:      "Weekday Dev",
+		Days:      []string{"mon-fri"},
+		StartTime: "09:00",
+		EndTime:   "12:00",
+		Profile:   "dev",
+		Enabled:   true,
+	}); err != nil {
+		t.Fatalf("AddSchedule: %v", err)
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	reloaded, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig reload: %v", err)
+	}
+	if reloaded.NotificationsEnabled {
+		t.Errorf("expected explicit notifications_enabled=false to persist")
+	}
+	if reloaded.Hooks.OnStart != "echo start" || reloaded.Hooks.OnEnd != "echo end" {
+		t.Errorf("hooks did not round-trip: %+v", reloaded.Hooks)
+	}
+	if len(reloaded.Schedules) != 1 || reloaded.Schedules[0].Name != "Weekday Dev" {
+		t.Errorf("schedules did not round-trip: %+v", reloaded.Schedules)
 	}
 }

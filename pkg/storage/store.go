@@ -87,6 +87,7 @@ type AnalyticsSummary struct {
 	TotalHours           float64     `json:"total_hours"`
 	TotalBlocked         int         `json:"total_blocked"`
 	ActiveStreakDays     int         `json:"active_streak_days"`
+	LongestStreakDays    int         `json:"longest_streak_days"`
 	TodayFocusMinutes    int         `json:"today_focus_minutes"`
 	DailyGoalMinutes     int         `json:"daily_goal_minutes"`
 	DailyGoalProgressPct float64     `json:"daily_goal_progress_pct"`
@@ -687,6 +688,38 @@ func (s *Store) ComputeAnalyticsWithGoal(days int, dailyGoalMinutes int, now tim
 		}
 	}
 
+	// Longest consecutive streak across all recorded completed dates
+	longestStreak := 0
+	if len(completedDates) > 0 {
+		sortedDates := make([]string, 0, len(completedDates))
+		for dStr := range completedDates {
+			sortedDates = append(sortedDates, dStr)
+		}
+		sort.Strings(sortedDates)
+		runLen := 0
+		var prevDate time.Time
+		hasPrev := false
+		for _, dStr := range sortedDates {
+			cur, err := time.Parse("2006-01-02", dStr)
+			if err != nil {
+				continue
+			}
+			if hasPrev && cur.Equal(prevDate.AddDate(0, 0, 1)) {
+				runLen++
+			} else {
+				runLen = 1
+			}
+			if runLen > longestStreak {
+				longestStreak = runLen
+			}
+			prevDate = cur
+			hasPrev = true
+		}
+	}
+	if streak > longestStreak {
+		longestStreak = streak
+	}
+
 	daily := make([]DailyStat, 0, days)
 	for i := days - 1; i >= 0; i-- {
 		d := today.AddDate(0, 0, -i).Format("2006-01-02")
@@ -709,6 +742,7 @@ func (s *Store) ComputeAnalyticsWithGoal(days int, dailyGoalMinutes int, now tim
 		TotalHours:           float64(totalMinutes) / 60.0,
 		TotalBlocked:         totalBlocked,
 		ActiveStreakDays:     streak,
+		LongestStreakDays:    longestStreak,
 		TodayFocusMinutes:    todayFocusMinutes,
 		DailyGoalMinutes:     goalMinutes,
 		DailyGoalProgressPct: goalPct,

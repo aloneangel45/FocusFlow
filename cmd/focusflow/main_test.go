@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aloneangel45/focusflow/pkg/engine"
+	"github.com/aloneangel45/focusflow/pkg/profile"
+	"github.com/aloneangel45/focusflow/pkg/schedule"
 	"github.com/aloneangel45/focusflow/pkg/storage"
 )
 
@@ -28,6 +32,17 @@ func setupHermeticCLIEnv(t *testing.T) (string, string) {
 	t.Setenv("FOCUSFLOW_HOME", stateDir)
 	t.Setenv("FOCUSFLOW_HOSTS_PATH", hostsPath)
 	return stateDir, hostsPath
+}
+
+type lockedBuffer struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.Write(p)
 }
 
 func execCLI(args ...string) (int, string, string) {
@@ -254,24 +269,40 @@ func TestCLI_MultiCyclePomodoroAndInterruptRollback(t *testing.T) {
 	}
 
 	// 2. Hardcore mode keeps lockdown continuous during break, and SIGINT during break rolls back cleanly
-	outBuf.Reset()
+	var syncOutMu sync.Mutex
+	var syncOutBuf bytes.Buffer
+	syncOut := &lockedBuffer{mu: &syncOutMu, buf: &syncOutBuf}
 	errBuf.Reset()
 	sigBreakChan := make(chan os.Signal, 1)
+	doneBreak := make(chan int, 1)
 	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		sigBreakChan <- os.Interrupt
+		doneBreak <- runStartWithSignals(
+			[]string{"--profile", "hardcore", "--strict", "hardcore", "--seconds", "1", "--cycles", "2", "--break-seconds", "8"},
+			syncOut,
+			&errBuf,
+			sigBreakChan,
+		)
 	}()
-	interruptCode := runStartWithSignals(
-		[]string{"--profile", "hardcore", "--strict", "hardcore", "--seconds", "1", "--cycles", "2", "--break-seconds", "4"},
-		&outBuf,
-		&errBuf,
-		sigBreakChan,
-	)
+	breakWaitDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(breakWaitDeadline) {
+		syncOutMu.Lock()
+		inBreak := strings.Contains(syncOutBuf.String(), "hardcore lockdown continuous")
+		syncOutMu.Unlock()
+		if inBreak {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	sigBreakChan <- os.Interrupt
+	interruptCode := <-doneBreak
 	if interruptCode != 130 {
 		t.Fatalf("expected exit code 130 on SIGINT, got %d", interruptCode)
 	}
-	if !strings.Contains(outBuf.String(), "hardcore lockdown continuous") {
-		t.Errorf("expected hardcore continuous lockdown message during break:\n%s", outBuf.String())
+	syncOutMu.Lock()
+	breakOutStr := syncOutBuf.String()
+	syncOutMu.Unlock()
+	if !strings.Contains(breakOutStr, "hardcore lockdown continuous") {
+		t.Errorf("expected hardcore continuous lockdown message during break:\n%s", breakOutStr)
 	}
 	rawHosts, _ := os.ReadFile(hostsPath)
 	if engine.HasManagedMarkers(string(rawHosts)) {
@@ -592,5 +623,262 @@ func TestCLI_HardcoreMultiCycleBreakRefreshesJournalLease(t *testing.T) {
 
 	if !refreshed {
 		t.Fatalf("expected hardcore break to refresh hosts journal ExpectedEndAt lease! output:\n%s", outBuf.String())
+	}
+}
+
+func TestCLI_ScheduleCRUDNextAndDaemonLifecycle(t *testing.T) {
+	_, hostsPath := setupHermeticCLIEnv(t)
+	t.Setenv("FOCUSFLOW_NO_NOTIFY", "1")
+
+	// 1. Initially empty schedule list
+	code, out, errOut := execCLI("schedule", "list", "--json")
+	if code != 0 {
+		t.Fatalf("schedule list failed: %s", errOut)
+	}
+	var listResp struct {
+		Schedules []schedule.ScheduleRule `json:"schedules"`
+	}
+	if err := json.Unmarshal([]byte(out), &listResp); err != nil || len(listResp.Schedules) != 0 {
+		t.Fatalf("expected empty schedules, got %s (err=%v)", out, err)
+	}
+
+	// 2. Reject invalid schedule inputs
+	if c, _, _ := execCLI("schedule", "add", "--name", "Bad", "--days", "funday", "--from", "09:00", "--to", "12:00", "--profile", "dev"); c == 0 {
+		t.Errorf("expected invalid days to fail")
+	}
+	if c, _, _ := execCLI("schedule", "add", "--name", "Bad2", "--days", "mon-fri", "--from", "09:00", "--to", "09:00", "--profile", "dev"); c == 0 {
+		t.Errorf("expected zero-length schedule to fail")
+	}
+	if c, _, _ := execCLI("schedule", "add", "--name", "Bad3", "--days", "mon-fri", "--from", "09:00", "--to", "12:00", "--profile", "nonexistent"); c == 0 {
+		t.Errorf("expected unknown profile schedule to fail")
+	}
+
+	// 3. Add valid weekday schedule
+	code, out, errOut = execCLI(
+		"schedule", "add",
+		"--name", "Morning Deep Work",
+		"--days", "mon-fri",
+		"--from", "09:00",
+		"--to", "12:00",
+		"--profile", "dev",
+		"--json",
+	)
+	if code != 0 {
+		t.Fatalf("schedule add failed: %s", errOut)
+	}
+	var addResp struct {
+		Added    bool                  `json:"added"`
+		Schedule schedule.ScheduleRule `json:"schedule"`
+	}
+	if err := json.Unmarshal([]byte(out), &addResp); err != nil || !addResp.Added || addResp.Schedule.Profile != "dev" {
+		t.Fatalf("unexpected schedule add response: %s (err=%v)", out, err)
+	}
+
+	// Reject duplicate name
+	if c, _, _ := execCLI("schedule", "add", "--name", "morning deep work", "--days", "mon", "--from", "10:00", "--to", "11:00", "--profile", "study"); c == 0 {
+		t.Errorf("expected duplicate schedule name to fail")
+	}
+
+	// 4. `schedule next --json` computes next window
+	code, out, errOut = execCLI("schedule", "next", "--json")
+	if code != 0 {
+		t.Fatalf("schedule next --json failed: %s", errOut)
+	}
+	var nextResp scheduleNextJSONOutput
+	if err := json.Unmarshal([]byte(out), &nextResp); err != nil || nextResp.Next == nil {
+		t.Fatalf("expected non-nil next window in JSON, got %s (err=%v)", out, err)
+	}
+	if nextResp.Next.Profile != "dev" || nextResp.Next.StartsInSeconds <= 0 {
+		t.Fatalf("unexpected next window: %+v", nextResp.Next)
+	}
+
+	// 5. Daemon enters an active window, engages hosts sinkhole, and cleanly releases at window end
+	cfg, err := profile.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cfg.Schedules = []schedule.ScheduleRule{
+		{
+			ID:        "sch-active-test",
+			Name:      "Active Window Test",
+			Days:      []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"},
+			StartTime: "10:00",
+			EndTime:   "10:05",
+			Profile:   "study",
+			Enabled:   true,
+		},
+	}
+	if err := profile.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	var mu sync.Mutex
+	simNow := time.Date(2026, 11, 20, 10, 4, 59, 0, time.Local)
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return simNow
+	}
+
+	var dOut, dErr bytes.Buffer
+	sigChan := make(chan os.Signal, 1)
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runScheduleDaemonWithSignals(
+			[]string{"--check-interval", "50ms", "--no-notify"},
+			&dOut,
+			&dErr,
+			sigChan,
+			nowFn,
+		)
+	}()
+
+	// Wait until hosts sinkhole is engaged by the daemon
+	deadline := time.Now().Add(5 * time.Second)
+	engaged := false
+	for time.Now().Before(deadline) {
+		rawHosts, _ := os.ReadFile(hostsPath)
+		if engine.HasManagedMarkers(string(rawHosts)) {
+			engaged = true
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	if !engaged {
+		sigChan <- os.Interrupt
+		<-doneCh
+		t.Fatalf("scheduler daemon did not engage hosts sinkhole inside active window; out=%s err=%s", dOut.String(), dErr.String())
+	}
+
+	// Advance simulated clock past 10:05 so daemon releases window cleanly
+	mu.Lock()
+	simNow = time.Date(2026, 11, 20, 10, 5, 1, 0, time.Local)
+	mu.Unlock()
+
+	deadline = time.Now().Add(5 * time.Second)
+	released := false
+	for time.Now().Before(deadline) {
+		rawHosts, _ := os.ReadFile(hostsPath)
+		if !engine.HasManagedMarkers(string(rawHosts)) {
+			released = true
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	sigChan <- os.Interrupt
+	exitCode := <-doneCh
+
+	if !released {
+		t.Fatalf("scheduler daemon did not release hosts sinkhole at window end; out=%s", dOut.String())
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected daemon graceful shutdown code 0, got %d (err=%s)", exitCode, dErr.String())
+	}
+
+	// 6. Remove schedule by name/id
+	code, out, errOut = execCLI("schedule", "remove", "Active Window Test", "--json")
+	if code != 0 {
+		t.Fatalf("schedule remove failed: %s", errOut)
+	}
+	if !strings.Contains(out, `"removed": true`) {
+		t.Fatalf("unexpected remove output: %s", out)
+	}
+}
+
+func TestCLI_StatsHeatmapANSIAndASCIIDegradation(t *testing.T) {
+	setupHermeticCLIEnv(t)
+
+	store, err := storage.NewStore()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	now := time.Now()
+	// Create a 3-day active streak today..today-2 and a 5-day historical longest streak 20..24 days ago
+	for _, offset := range []int{0, 1, 2, 20, 21, 22, 23, 24} {
+		day := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, now.Location()).AddDate(0, 0, -offset)
+		_ = store.FinalizeSession(storage.GenerateSessionID(), "dev", 60, true, "completed", 1, day, day.Add(60*time.Minute))
+	}
+
+	// 1. Color heatmap
+	t.Setenv("NO_COLOR", "")
+	code, outColor, errOut := execCLI("stats", "--heatmap")
+	if code != 0 {
+		t.Fatalf("stats --heatmap failed: %s", errOut)
+	}
+	if !strings.Contains(outColor, "90-Day Focus Contribution Heatmap") || !strings.Contains(outColor, "\x1b[38;5;") {
+		t.Fatalf("expected ANSI 90-day heatmap output, got:\n%s", outColor)
+	}
+	if !strings.Contains(outColor, "Active 3 days") || !strings.Contains(outColor, "Longest 5 days") {
+		t.Fatalf("expected active=3 and longest=5 streaks, got:\n%s", outColor)
+	}
+
+	// 2. --no-color ASCII fallback
+	code, outASCII, errOut := execCLI("stats", "--heatmap", "--no-color")
+	if code != 0 {
+		t.Fatalf("stats --heatmap --no-color failed: %s", errOut)
+	}
+	if strings.Contains(outASCII, "\x1b[") {
+		t.Fatalf("--no-color heatmap must not emit ANSI escapes:\n%s", outASCII)
+	}
+	if !strings.Contains(outASCII, "[ ] [.] [o] [O] [#]") {
+		t.Fatalf("expected ASCII legend in --no-color heatmap:\n%s", outASCII)
+	}
+
+	// 3. NO_COLOR env var fallback
+	t.Setenv("NO_COLOR", "1")
+	code, outNoColorEnv, errOut := execCLI("stats", "--heatmap")
+	if code != 0 || strings.Contains(outNoColorEnv, "\x1b[") {
+		t.Fatalf("NO_COLOR=1 heatmap must degrade cleanly to ASCII (code=%d err=%s):\n%s", code, errOut, outNoColorEnv)
+	}
+}
+
+func TestCLI_LifecycleHooksAndRollbackResilience(t *testing.T) {
+	stateDir, hostsPath := setupHermeticCLIEnv(t)
+	t.Setenv("FOCUSFLOW_NO_NOTIFY", "1")
+
+	markerFile := filepath.Join(stateDir, "hook_fired.txt")
+	var startHook, failEndHook string
+	if runtime.GOOS == "windows" {
+		startHook = `echo %FOCUSFLOW_EVENT%:%FOCUSFLOW_PROFILE%:%FOCUSFLOW_MINUTES%> "` + markerFile + `"`
+		failEndHook = `exit /b 9`
+	} else {
+		startHook = `printf '%s:%s:%s' "$FOCUSFLOW_EVENT" "$FOCUSFLOW_PROFILE" "$FOCUSFLOW_MINUTES" > "` + markerFile + `"`
+		failEndHook = `exit 9`
+	}
+
+	var outBuf, errBuf bytes.Buffer
+	sigChan := make(chan os.Signal, 1)
+	code := runStartWithSignals(
+		[]string{
+			"--profile", "dev",
+			"--minutes", "30",
+			"--seconds", "1",
+			"--no-notify",
+			"--on-start", startHook,
+			"--on-end", failEndHook,
+		},
+		&outBuf,
+		&errBuf,
+		sigChan,
+	)
+	if code != 0 {
+		t.Fatalf("start with failing end hook should still succeed cleanly (code=%d): %s", code, errBuf.String())
+	}
+
+	rawMarker, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("expected --on-start hook marker file to exist: %v", err)
+	}
+	if !strings.Contains(string(rawMarker), "start:dev:30") {
+		t.Errorf("unexpected --on-start hook marker content: %q", string(rawMarker))
+	}
+	if !strings.Contains(errBuf.String(), "[WARN] Lifecycle hook (end) failed") {
+		t.Errorf("expected non-fatal warning from failing --on-end hook, got stderr=%q", errBuf.String())
+	}
+
+	// Critical invariant: failing --on-end hook MUST NEVER prevent hosts rollback
+	rawHosts, _ := os.ReadFile(hostsPath)
+	if engine.HasManagedMarkers(string(rawHosts)) {
+		t.Fatalf("hosts file still has managed markers after failing --on-end hook:\n%s", string(rawHosts))
 	}
 }

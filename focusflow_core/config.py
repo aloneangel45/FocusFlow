@@ -25,6 +25,187 @@ MAX_DAILY_GOAL_MINUTES = 1440
 BUILTIN_PROFILE_NAMES: frozenset[str] = frozenset({"study", "dev", "hardcore"})
 PROFILE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
+CANONICAL_SCHEDULE_DAYS: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_DAY_ALIAS_TO_INDEX: dict[str, int] = {
+    "mon": 0, "monday": 0,
+    "tue": 1, "tues": 1, "tuesday": 1,
+    "wed": 2, "weds": 2, "wednesday": 2,
+    "thu": 3, "thur": 3, "thurs": 3, "thursday": 3,
+    "fri": 4, "friday": 4,
+    "sat": 5, "saturday": 5,
+    "sun": 6, "sunday": 6,
+}
+
+
+def parse_schedule_days(spec: str | list[str] | tuple[str, ...]) -> list[str]:
+    """Parse day specifications like 'mon-fri', 'mon,wed,fri', 'fri-mon', 'daily' into canonical mon..sun list."""
+    if isinstance(spec, (list, tuple)):
+        raw_str = ",".join(str(x) for x in spec if x is not None)
+    else:
+        raw_str = str(spec or "")
+    trimmed = raw_str.strip().lower()
+    if not trimmed:
+        raise ValueError("empty schedule days specification")
+
+    present = [False] * 7
+    for part in trimmed.split(","):
+        tok = part.strip()
+        if not tok:
+            continue
+        if tok in ("daily", "all", "everyday", "*"):
+            present = [True] * 7
+            continue
+        if tok in ("weekdays", "weekday"):
+            for i in range(5):
+                present[i] = True
+            continue
+        if tok in ("weekends", "weekend"):
+            present[5] = True
+            present[6] = True
+            continue
+        if "-" in tok:
+            bounds = tok.split("-")
+            if len(bounds) != 2:
+                raise ValueError(f"invalid schedule day range {tok!r}")
+            s_idx = _DAY_ALIAS_TO_INDEX.get(bounds[0].strip())
+            e_idx = _DAY_ALIAS_TO_INDEX.get(bounds[1].strip())
+            if s_idx is None or e_idx is None:
+                raise ValueError(f"invalid schedule day range {tok!r}")
+            idx = s_idx
+            while True:
+                present[idx] = True
+                if idx == e_idx:
+                    break
+                idx = (idx + 1) % 7
+            continue
+        idx = _DAY_ALIAS_TO_INDEX.get(tok)
+        if idx is None:
+            raise ValueError(f"invalid schedule day token {tok!r}")
+        present[idx] = True
+
+    out = [CANONICAL_SCHEDULE_DAYS[i] for i, ok in enumerate(present) if ok]
+    if not out:
+        raise ValueError("no schedule days selected")
+    return out
+
+
+def _normalize_clock_time(raw: object) -> str:
+    s = str(raw or "").strip()
+    parts = s.split(":")
+    if len(parts) != 2 or not (1 <= len(parts[0]) <= 2) or len(parts[1]) != 2:
+        raise ValueError(f"invalid clock time {raw!r}")
+    if not (parts[0].isascii() and parts[0].isdigit() and parts[1].isascii() and parts[1].isdigit()):
+        raise ValueError(f"invalid clock time {raw!r}")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"clock time out of range {raw!r}")
+    return f"{hour:02d}:{minute:02d}"
+
+
+@dataclasses.dataclass
+class ScheduleRule:
+    id: str
+    name: str
+    days: list[str]
+    start_time: str
+    end_time: str
+    profile: str
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "days": list(self.days),
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "profile": self.profile,
+            "enabled": bool(self.enabled),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "ScheduleRule":
+        raw_name = str(data.get("name") or "").strip()
+        if not raw_name or len(raw_name) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in raw_name):
+            raise ValueError(f"invalid schedule name {raw_name!r}")
+        raw_days = data.get("days")
+        if not isinstance(raw_days, (list, tuple, str)):
+            raise ValueError("invalid schedule days")
+        days = parse_schedule_days(raw_days)
+        start_time = _normalize_clock_time(data.get("start_time"))
+        end_time = _normalize_clock_time(data.get("end_time"))
+        if start_time == end_time:
+            raise ValueError("schedule start_time and end_time cannot be identical")
+        prof = _resolve_profile_alias(str(data.get("profile") or ""))
+        if not prof:
+            raise ValueError("schedule profile cannot be empty")
+        raw_id = str(data.get("id") or "").strip() or f"sch-{os.urandom(4).hex()}"
+        raw_enabled = data.get("enabled", True)
+        enabled = bool(raw_enabled) if isinstance(raw_enabled, bool) else True
+        return cls(
+            id=raw_id,
+            name=raw_name,
+            days=days,
+            start_time=start_time,
+            end_time=end_time,
+            profile=prof,
+            enabled=enabled,
+        )
+
+
+@dataclasses.dataclass
+class HooksConfig:
+    on_start: str = ""
+    on_end: str = ""
+    on_break: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        out: dict[str, object] = {
+            "on_start": (self.on_start or "").strip(),
+            "on_end": (self.on_end or "").strip(),
+        }
+        clean_break = (self.on_break or "").strip()
+        if clean_break:
+            out["on_break"] = clean_break
+        return out
+
+    @classmethod
+    def from_dict(cls, data: object) -> "HooksConfig":
+        if not isinstance(data, dict):
+            return cls()
+        raw_start = data.get("on_start")
+        raw_end = data.get("on_end")
+        raw_break = data.get("on_break")
+        return cls(
+            on_start=str(raw_start).strip() if isinstance(raw_start, str) else "",
+            on_end=str(raw_end).strip() if isinstance(raw_end, str) else "",
+            on_break=str(raw_break).strip() if isinstance(raw_break, str) else "",
+        )
+
+
+def _sanitize_schedule_rules(raw_rules: object) -> list[ScheduleRule]:
+    if not isinstance(raw_rules, (list, tuple)):
+        return []
+    out: list[ScheduleRule] = []
+    seen_ids: set[str] = set()
+    for item in raw_rules:
+        if isinstance(item, ScheduleRule):
+            rule_data: dict[str, object] = item.to_dict()
+        elif isinstance(item, dict):
+            rule_data = item
+        else:
+            continue
+        try:
+            rule = ScheduleRule.from_dict(rule_data)
+        except ValueError:
+            continue
+        if rule.id in seen_ids:
+            rule.id = f"sch-{os.urandom(4).hex()}"
+        seen_ids.add(rule.id)
+        out.append(rule)
+    return out
+
 
 def normalize_daily_goal_minutes(value: int | float | str | None) -> int:
     """Default omitted or <= 0 daily goal values to 120 and clamp to 5..1440."""
@@ -143,12 +324,18 @@ class ConfigStore:
     custom_processes: list[str]
     profiles: dict[str, FocusProfile]
     daily_goal_minutes: int = DEFAULT_DAILY_GOAL_MINUTES
+    notifications_enabled: bool = True
+    schedules: list[ScheduleRule] = dataclasses.field(default_factory=list)
+    hooks: HooksConfig = dataclasses.field(default_factory=HooksConfig)
 
     def to_dict(self) -> dict[str, object]:
         return {
             "custom_domains": sanitize_domains(self.custom_domains),
             "custom_processes": _sanitize_process_list(self.custom_processes),
             "daily_goal_minutes": normalize_daily_goal_minutes(self.daily_goal_minutes),
+            "notifications_enabled": bool(self.notifications_enabled),
+            "schedules": [r.to_dict() for r in _sanitize_schedule_rules(self.schedules)],
+            "hooks": self.hooks.to_dict() if isinstance(self.hooks, HooksConfig) else HooksConfig.from_dict(self.hooks).to_dict(),
             "profiles": {k: v.to_dict() for k, v in self.profiles.items()},
         }
 
@@ -340,6 +527,10 @@ def save_config(cfg: ConfigStore, state_dir: str | None = None) -> None:
     cfg.custom_domains = sanitize_domains(cfg.custom_domains)
     cfg.custom_processes = _sanitize_process_list(cfg.custom_processes)
     cfg.daily_goal_minutes = normalize_daily_goal_minutes(cfg.daily_goal_minutes)
+    cfg.notifications_enabled = bool(cfg.notifications_enabled)
+    cfg.schedules = _sanitize_schedule_rules(cfg.schedules)
+    if not isinstance(cfg.hooks, HooksConfig):
+        cfg.hooks = HooksConfig.from_dict(cfg.hooks)
 
     payload = (json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     fd, tmp_path = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=resolved_dir)
@@ -462,6 +653,10 @@ def load_config(state_dir: str | None = None) -> ConfigStore:
         list(ca) if isinstance(ca, (list, tuple)) else []
     )
     daily_goal = normalize_daily_goal_minutes(raw.get("daily_goal_minutes"))
+    raw_notify = raw.get("notifications_enabled")
+    notifications_enabled = raw_notify if isinstance(raw_notify, bool) else True
+    schedules = _sanitize_schedule_rules(raw.get("schedules"))
+    hooks = HooksConfig.from_dict(raw.get("hooks"))
 
     profiles_map: dict[str, FocusProfile] = {}
     raw_profiles = raw.get("profiles")
@@ -481,6 +676,9 @@ def load_config(state_dir: str | None = None) -> ConfigStore:
         custom_processes=_sanitize_process_list([str(x) for x in raw_procs if x is not None]),
         profiles=profiles_map,
         daily_goal_minutes=daily_goal,
+        notifications_enabled=notifications_enabled,
+        schedules=schedules,
+        hooks=hooks,
     )
 
 

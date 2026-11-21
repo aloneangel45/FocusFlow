@@ -57,8 +57,19 @@ def test_config_migration_and_schema_roundtrip(hermetic_focusflow_env: tuple[Pat
     save_config(cfg)
 
     saved_raw = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert set(saved_raw.keys()) == {"custom_domains", "custom_processes", "daily_goal_minutes", "profiles"}
+    assert set(saved_raw.keys()) == {
+        "custom_domains",
+        "custom_processes",
+        "daily_goal_minutes",
+        "notifications_enabled",
+        "schedules",
+        "hooks",
+        "profiles",
+    }
     assert saved_raw["daily_goal_minutes"] == 120
+    assert saved_raw["notifications_enabled"] is True
+    assert saved_raw["schedules"] == []
+    assert saved_raw["hooks"] == {"on_start": "", "on_end": ""}
     assert set(saved_raw["profiles"].keys()) >= {"study", "dev", "hardcore"}
 
     # Verify <= 0 defaults to 120 and out-of-range values clamp to 5..1440

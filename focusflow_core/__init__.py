@@ -1,6 +1,6 @@
-"""FocusFlow v2.2.2 unified standard-library core engine."""
+"""FocusFlow v2.3.0 unified standard-library core engine."""
 
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 
 from .paths import (
     get_backup_path,
@@ -49,11 +49,14 @@ from .privileges import (
 )
 from .config import (
     BUILTIN_PROFILE_NAMES,
+    CANONICAL_SCHEDULE_DAYS,
     DEFAULT_DAILY_GOAL_MINUTES,
     MAX_DAILY_GOAL_MINUTES,
     MIN_DAILY_GOAL_MINUTES,
     ConfigStore,
     FocusProfile,
+    HooksConfig,
+    ScheduleRule,
     default_profiles,
     dev_profile,
     hardcore_profile,
@@ -61,6 +64,7 @@ from .config import (
     load_config,
     load_or_default,
     normalize_daily_goal_minutes,
+    parse_schedule_days,
     save_config,
     study_profile,
     validate_and_sanitize_domains,
@@ -119,11 +123,15 @@ __all__ = [
     "flush_dns",
     "flush_dns_async",
     "BUILTIN_PROFILE_NAMES",
+    "CANONICAL_SCHEDULE_DAYS",
     "DEFAULT_DAILY_GOAL_MINUTES",
     "MIN_DAILY_GOAL_MINUTES",
     "MAX_DAILY_GOAL_MINUTES",
     "FocusProfile",
+    "ScheduleRule",
+    "HooksConfig",
     "ConfigStore",
+    "parse_schedule_days",
     "default_profiles",
     "study_profile",
     "dev_profile",

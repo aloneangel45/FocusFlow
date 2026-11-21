@@ -325,11 +325,13 @@ class FocusFlowV222RegressionTests(unittest.TestCase):
 
     def test_v222_version_and_workflow_node24_alignment(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
-        self.assertEqual(focusflow_core.__version__, "2.2.2")
-        self.assertIn("v2.2.2", (repo_root / "FocusFlowGUI.py").read_text(encoding="utf-8"))
-        self.assertIn("v2.2.2", (repo_root / "Launch_FocusFlow_GUI.bat").read_text(encoding="utf-8"))
-        self.assertIn('Version = "2.2.2"', (repo_root / "cmd" / "focusflow" / "main.go").read_text(encoding="utf-8"))
-        self.assertIn('DefaultVersion = "2.2.2"', (repo_root / "pkg" / "tui" / "hud.go").read_text(encoding="utf-8"))
+        ver = focusflow_core.__version__
+        self.assertEqual(ver, "2.3.0")
+        self.assertIn(f"v{ver}", (repo_root / "FocusFlowGUI.py").read_text(encoding="utf-8"))
+        self.assertIn(f"v{ver}", (repo_root / "Launch_FocusFlow_GUI.bat").read_text(encoding="utf-8"))
+        self.assertIn(f'Version = "{ver}"', (repo_root / "cmd" / "focusflow" / "main.go").read_text(encoding="utf-8"))
+        self.assertIn(f'DefaultVersion = "{ver}"', (repo_root / "pkg" / "tui" / "hud.go").read_text(encoding="utf-8"))
+        self.assertIn(f"## [{ver}]", (repo_root / "CHANGELOG.md").read_text(encoding="utf-8"))
         self.assertIn("## [2.2.2]", (repo_root / "CHANGELOG.md").read_text(encoding="utf-8"))
 
         for wf_name in ("ci.yml", "release.yml"):

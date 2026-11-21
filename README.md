@@ -1,4 +1,4 @@
-# FocusFlow v2.2
+# FocusFlow v2.3
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/assets/banner.png" alt="FocusFlow Banner" width="700" onerror="this.style.display='none'"/>
@@ -21,7 +21,7 @@
 
 ---
 
-## Why FocusFlow v2.2?
+## Why FocusFlow v2.3?
 
 Conventional website blockers and browser extensions fail under real-world conditions:
 1. **Trivial Extension Bypass:** Browser extensions can be disabled in seconds or bypassed via private windows and secondary browsers.
@@ -29,8 +29,11 @@ Conventional website blockers and browser extensions fail under real-world condi
 3. **Hosts File &amp; ACL Corruption:** Naive scripts overwrite `C:\Windows\System32\drivers\etc\hosts` in place without write-ahead journaling or Windows DACL preservation—breaking DNS resolution after power loss, crashes, or reboots.
 4. **Heavy Runtime Dependencies:** Typical desktop wrappers pull hundreds of megabytes of packages just to enumerate processes.
 
-**FocusFlow v2.2 solves these failure modes at the operating-system boundary:**
-* **Unified Go CLI + Zero-Dependency Python HUD:** `cmd/focusflow` (Go) and `FocusFlowGUI.py` + `focusflow_core/` (Python stdlib + Win32 `ctypes`) share the exact same state directory, `config.json` (including custom named profiles and `daily_goal_minutes`), `sessions.json`, `hosts.focusflow.journal.json`, and managed block markers.
+**FocusFlow v2.3 solves these failure modes at the operating-system boundary:**
+* **Unified Go CLI + Zero-Dependency Python HUD:** `cmd/focusflow` (Go) and `FocusFlowGUI.py` + `focusflow_core/` (Python stdlib + Win32 `ctypes`) share the exact same state directory, `config.json` (custom profiles, `daily_goal_minutes`, `schedules`, `hooks`, `notifications_enabled`), `sessions.json`, `hosts.focusflow.journal.json`, and managed block markers.
+* **Automated Recurring Schedules &amp; Daemon Runner:** Define recurring weekday or overnight focus windows (`focusflow schedule add --name "Morning Dev" --days mon-fri --from 09:00 --to 12:00 --profile dev`), inspect the next upcoming window (`focusflow schedule next`), and automate enforcement with `focusflow schedule run`.
+* **90-Day Contribution Heatmap (CLI + HUD):** Render a GitHub-style 13-week × 7-day focus intensity heatmap calibrated against your daily goal (`focusflow stats --heatmap`, with `--no-color` / `NO_COLOR` ASCII fallback) alongside a native Catppuccin Mocha heatmap canvas in the desktop HUD.
+* **Native OS Notifications &amp; Privilege-Hardened Lifecycle Hooks:** Non-blocking OS notifications (Windows WinRT Toast / macOS `osascript` / Linux `notify-send`, opt-out via `--no-notify`) and shell lifecycle hooks (`--on-start`, `--on-break`, `--on-end` or `config.json` `hooks`) with `10s` timeouts, `FOCUSFLOW_*` context env vars, and mandatory POSIX `sudo` privilege-dropping (`SUDO_UID`/`SUDO_GID`).
 * **Custom Named Profiles, Daily Goals &amp; Multi-Cycle Pomodoro Engine:** Create validated custom workflow profiles (`focusflow profile create`), track daily focus targets (`focusflow goal`), and run multi-sprint Pomodoro blocks (`focusflow start --cycles 4 --break 5`) with automatic `hosts` shield pause between sprints (or continuous lockdown in `hardcore` mode).
 * **Write-Ahead SHA-256 Rollback Journal &amp; Auto-Recovery:** Strips any prior managed blocks before computing a clean baseline SHA-256 backup, persists `hosts.focusflow.journal.json` before touching `hosts`, preserves Windows DACLs via `ReplaceFileW` (`NetworkService` / `Users` read permissions remain intact), and automatically recovers orphaned crash/reboot states on startup (`RecoverIfOrphaned`).
 * **Dual-Stack IPv4 + IPv6 Sinkhole &amp; Expanded Anti-DoH:** Blocks both `0.0.0.0` and `::` (including `www.` subdomains) alongside major DoH bypass endpoints, with mid-session tamper verification and non-blocking DNS cache flushing.
@@ -43,7 +46,7 @@ Conventional website blockers and browser extensions fail under real-world condi
 
 ```text
 +----------------------------------------------------------------------+
-|       FocusFlow v2.2 CLI (Go)    <==>    Desktop HUD (Python/Tk)     |
+|       FocusFlow v2.3 CLI (Go)    <==>    Desktop HUD (Python/Tk)     |
 +-----------------------------------+----------------------------------+
                                     |
           Shared State (%APPDATA%\FocusFlow or $FOCUSFLOW_HOME)
@@ -77,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install
 ```powershell
 irm https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.ps1 | iex
 ```
-Both installers download `checksums.txt` from GitHub Releases and verify the archive SHA-256 digest prior to extraction. Pin a specific release with `FOCUSFLOW_VERSION=v2.2.2`.
+Both installers download `checksums.txt` from GitHub Releases and verify the archive SHA-256 digest prior to extraction. Pin a specific release with `FOCUSFLOW_VERSION=v2.3.0`.
 
 ### 2. Desktop HUD (Python 3.10+, Zero Required Packages)
 Launch `Launch_FocusFlow_GUI.bat` on Windows or run directly:
@@ -92,7 +95,7 @@ python FocusFlowGUI.py --elevate
 
 ### 3. Build Native Standalone CLI from Source (Go 1.23+)
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.2.2" -o focusflow ./cmd/focusflow
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=2.3.0" -o focusflow ./cmd/focusflow
 ```
 
 ---
@@ -108,8 +111,16 @@ focusflow menu
 # Start a 50-minute Developer sprint (elevating via UAC/sudo if needed)
 focusflow start --profile dev --minutes 50 --elevate
 
-# Multi-cycle Pomodoro: 4 cycles of 25m work + 5m recovery break
-focusflow start --profile study --cycles 4 --break 5 --elevate
+# Multi-cycle Pomodoro: 4 cycles of 25m work + 5m recovery break with lifecycle hooks
+focusflow start --profile study --cycles 4 --break 5 --on-start "echo Sprint started" --on-end "echo Sprint done" --elevate
+focusflow start --profile dev --minutes 50 --no-notify
+
+# Automate recurring focus windows (weekday wrap-around & overnight windows supported)
+focusflow schedule add --name "Morning Dev" --days mon-fri --from 09:00 --to 12:00 --profile dev
+focusflow schedule list
+focusflow schedule next --json
+focusflow schedule run --check-interval 30s --elevate
+focusflow schedule remove "Morning Dev"
 
 # Hardcore Aegis multi-cycle sprint (lockdown stays continuous across breaks)
 focusflow start --profile hardcore --cycles 2 --break 5 --strict hardcore
@@ -135,8 +146,10 @@ focusflow add site reddit.com
 focusflow add app steam.exe
 focusflow remove site reddit.com
 
-# View genuine focus hours, daily goal progress, completion rate, streak & 7-day ASCII chart
+# View genuine focus hours, daily goal progress, streaks, 7-day chart & 90-day contribution heatmap
 focusflow stats --days 7
+focusflow stats --heatmap
+focusflow stats --heatmap --no-color
 focusflow stats --days 7 --json
 
 # Export telemetry to JSON or CSV

@@ -1,5 +1,5 @@
 """
-FocusFlow v2.2.2 - Native Desktop Deep Work & Distraction Shield HUD
+FocusFlow v2.3.0 - Native Desktop Deep Work & Distraction Shield HUD
 Theme: Catppuccin Mocha Minimal Systems Architecture (Zero-Emoji)
 High-DPI Per-Monitor v2, Crash-Safe SHA-256 Hosts Engine, Win32 Toolhelp32 Supervisor
 """
@@ -130,6 +130,30 @@ THEME: dict[str, str] = {
     "mauve": "#cba6f7",
     "teal": "#94e2d5",
 }
+
+# Catppuccin Mocha 5-step green intensity ramp for the 90-day focus heatmap
+HEATMAP_COLORS: tuple[str, str, str, str, str] = (
+    "#313244",  # level 0: 0 min
+    "#2e4a3b",  # level 1: >0% .. <35% of daily goal
+    "#487e58",  # level 2: 35% .. <70%
+    "#74b87c",  # level 3: 70% .. <100%
+    "#a6e3a1",  # level 4: >= 100% daily goal reached
+)
+
+
+def compute_heatmap_intensity(minutes: int, daily_goal_minutes: int) -> int:
+    """Map daily focus minutes against daily_goal_minutes to intensity level 0..4."""
+    if minutes <= 0:
+        return 0
+    goal = normalize_daily_goal_minutes(daily_goal_minutes)
+    ratio = minutes / goal
+    if ratio >= 1.0:
+        return 4
+    if ratio >= 0.70:
+        return 3
+    if ratio >= 0.35:
+        return 2
+    return 1
 
 DEFAULT_QUOTES: list[str] = [
     "Discipline consistently outperforms fleeting motivation.",
@@ -1252,8 +1276,8 @@ class FocusFlowGUI:
             val_lbl.pack(anchor="w", pady=(4, 0))
             self.kpi_labels[key] = val_lbl
 
-        chart_card = tk.Frame(f, bg=THEME["surface0"], padx=20, pady=18)
-        chart_card.pack(fill="both", expand=True, pady=8)
+        chart_card = tk.Frame(f, bg=THEME["surface0"], padx=18, pady=12)
+        chart_card.pack(fill="both", expand=True, pady=(4, 6))
 
         tk.Label(
             chart_card,
@@ -1261,14 +1285,41 @@ class FocusFlowGUI:
             font=("Consolas", 10, "bold"),
             fg=THEME["text"],
             bg=THEME["surface0"],
-        ).pack(anchor="w", pady=(0, 12))
+        ).pack(anchor="w", pady=(0, 8))
 
-        self.chart_canvas = tk.Canvas(chart_card, bg=THEME["mantle"], highlightthickness=0)
+        self.chart_canvas = tk.Canvas(chart_card, bg=THEME["mantle"], height=165, highlightthickness=0)
         self.chart_canvas.pack(fill="both", expand=True)
         self.chart_canvas.bind("<Configure>", lambda _e: self.draw_stats_chart())
 
+        heatmap_card = tk.Frame(f, bg=THEME["surface0"], padx=18, pady=12)
+        heatmap_card.pack(fill="x", pady=(0, 6))
+
+        hm_header = tk.Frame(heatmap_card, bg=THEME["surface0"])
+        hm_header.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            hm_header,
+            text="90-DAY FOCUS CONTRIBUTION HEATMAP (13 WEEKS)",
+            font=("Consolas", 10, "bold"),
+            fg=THEME["green"],
+            bg=THEME["surface0"],
+        ).pack(side="left")
+
+        self.lbl_heatmap_meta = tk.Label(
+            hm_header,
+            text="Longest Streak: 0 Days | Hover cell for details",
+            font=("Consolas", 9),
+            fg=THEME["subtext"],
+            bg=THEME["surface0"],
+        )
+        self.lbl_heatmap_meta.pack(side="right")
+
+        self.heatmap_canvas = tk.Canvas(heatmap_card, bg=THEME["mantle"], height=148, highlightthickness=0)
+        self.heatmap_canvas.pack(fill="x")
+        self.heatmap_canvas.bind("<Configure>", lambda _e: self.draw_heatmap_panel())
+
         btn_bar = tk.Frame(f, bg=THEME["base"])
-        btn_bar.pack(fill="x", pady=8)
+        btn_bar.pack(fill="x", pady=6)
 
         tk.Button(
             btn_bar,
@@ -1310,6 +1361,8 @@ class FocusFlowGUI:
         ).pack(side="right", padx=6)
 
     def refresh_analytics_ui(self) -> None:
+        summary90 = self.session_store.compute_analytics(days=90)
+        self._latest_summary_90 = summary90
         summary = self.session_store.compute_analytics(days=7)
         self._latest_summary = summary
 
@@ -1323,15 +1376,151 @@ class FocusFlowGUI:
 
         if hasattr(self, "kpi_labels"):
             self.kpi_labels["hours"].config(text=f"{summary.total_hours:.1f}h ({summary.total_minutes}m)")
-            self.kpi_labels["streak"].config(text=f"{summary.active_streak_days} Days")
+            self.kpi_labels["streak"].config(
+                text=f"{summary.active_streak_days}d (Best {summary.longest_streak_days}d)"
+            )
             self.kpi_labels["rate"].config(
                 text=f"{summary.completion_rate:.0f}% ({summary.completed_sprints}/{summary.attempted_sprints})"
             )
             live_blocks = self.session_blocked_count if self.active_session_id else 0
             self.kpi_labels["blocked"].config(text=str(summary.total_blocked + live_blocks))
 
+        if hasattr(self, "lbl_heatmap_meta"):
+            active_days = sum(1 for d in summary90.daily if d.minutes > 0)
+            self._heatmap_default_meta = (
+                f"Active: {summary90.active_streak_days}d | Longest: {summary90.longest_streak_days}d | "
+                f"{active_days}/90 days | Goal: {summary90.daily_goal_minutes}m"
+            )
+            self.lbl_heatmap_meta.config(text=self._heatmap_default_meta)
+
         if hasattr(self, "chart_canvas"):
             self.draw_stats_chart()
+        if hasattr(self, "heatmap_canvas"):
+            self.draw_heatmap_panel()
+
+    def draw_heatmap_panel(self) -> None:
+        self.heatmap_canvas.delete("all")
+        w = self.heatmap_canvas.winfo_width()
+        h = self.heatmap_canvas.winfo_height()
+        if w < 180 or h < 90:
+            return
+
+        summary = getattr(self, "_latest_summary_90", None) or self.session_store.compute_analytics(days=90)
+        daily = summary.daily
+        goal = summary.daily_goal_minutes
+        by_date = {d.date: (d.minutes, d.sprints) for d in daily}
+
+        today = datetime.date.today()
+        window_days = max(1, len(daily))
+        start_day = today - datetime.timedelta(days=window_days - 1)
+        grid_start = start_day - datetime.timedelta(days=start_day.weekday())
+        grid_end = today + datetime.timedelta(days=6 - today.weekday())
+        num_weeks = max(1, ((grid_end - grid_start).days + 1 + 6) // 7)
+
+        left_pad = 44
+        top_pad = 22
+        bottom_pad = 22
+        cell_gap = 3
+        avail_h = max(40, h - top_pad - bottom_pad)
+        avail_w = max(120, w - left_pad - 24)
+        cell_size = max(8, min(14, (avail_h - 6 * cell_gap) // 7, (avail_w - (num_weeks - 1) * cell_gap) // num_weeks))
+        step = cell_size + cell_gap
+        grid_w = num_weeks * step - cell_gap
+        origin_x = max(left_pad, (w - grid_w) // 2)
+
+        # Weekday labels
+        for row_idx, lbl in ((0, "Mon"), (2, "Wed"), (4, "Fri"), (6, "Sun")):
+            cy = top_pad + row_idx * step + cell_size // 2
+            self.heatmap_canvas.create_text(
+                origin_x - 10,
+                cy,
+                text=lbl,
+                fill=THEME["subtext"],
+                font=("Consolas", 8),
+                anchor="e",
+            )
+
+        # Month headers + 13x7 cells
+        last_month = 0
+        last_month_col = -3
+        for col in range(num_weeks):
+            week_mon = grid_start + datetime.timedelta(days=col * 7)
+            ref_day = week_mon
+            for offset in range(7):
+                cand = week_mon + datetime.timedelta(days=offset)
+                if start_day <= cand <= today and (cand.day == 1 or offset == 0):
+                    ref_day = cand
+                    if cand.day == 1:
+                        break
+            if ref_day < start_day:
+                ref_day = start_day
+            if ref_day.month != last_month and col - last_month_col >= 2:
+                self.heatmap_canvas.create_text(
+                    origin_x + col * step,
+                    top_pad - 9,
+                    text=ref_day.strftime("%b"),
+                    fill=THEME["subtext"],
+                    font=("Consolas", 8),
+                    anchor="w",
+                )
+                last_month = ref_day.month
+                last_month_col = col
+
+            for row in range(7):
+                cell_date = week_mon + datetime.timedelta(days=row)
+                if cell_date < start_day or cell_date > today:
+                    continue
+                d_str = cell_date.strftime("%Y-%m-%d")
+                mins, sprints = by_date.get(d_str, (0, 0))
+                lvl = compute_heatmap_intensity(mins, goal)
+                x0 = origin_x + col * step
+                y0 = top_pad + row * step
+                rect_id = self.heatmap_canvas.create_rectangle(
+                    x0,
+                    y0,
+                    x0 + cell_size,
+                    y0 + cell_size,
+                    fill=HEATMAP_COLORS[lvl],
+                    outline=THEME["crust"],
+                    width=1,
+                )
+                tip = f"{d_str}: {mins} min ({sprints} sprint{'s' if sprints != 1 else ''}) | Goal: {goal}m"
+                self.heatmap_canvas.tag_bind(
+                    rect_id,
+                    "<Enter>",
+                    lambda _e, text=tip: self.lbl_heatmap_meta.config(text=text, fg=THEME["text"]),
+                )
+                self.heatmap_canvas.tag_bind(
+                    rect_id,
+                    "<Leave>",
+                    lambda _e: self.lbl_heatmap_meta.config(
+                        text=getattr(self, "_heatmap_default_meta", ""),
+                        fg=THEME["subtext"],
+                    ),
+                )
+
+        # Compact legend aligned bottom-right of grid
+        legend_y = top_pad + 7 * step + 5
+        lx = origin_x + grid_w - 118
+        self.heatmap_canvas.create_text(
+            lx - 4,
+            legend_y + 5,
+            text="Less",
+            fill=THEME["subtext"],
+            font=("Consolas", 8),
+            anchor="e",
+        )
+        for idx, color in enumerate(HEATMAP_COLORS):
+            bx = lx + idx * 14
+            self.heatmap_canvas.create_rectangle(bx, legend_y, bx + 10, legend_y + 10, fill=color, outline="")
+        self.heatmap_canvas.create_text(
+            lx + len(HEATMAP_COLORS) * 14 + 4,
+            legend_y + 5,
+            text="More",
+            fill=THEME["subtext"],
+            font=("Consolas", 8),
+            anchor="w",
+        )
 
     def draw_stats_chart(self) -> None:
         self.chart_canvas.delete("all")
@@ -1629,7 +1818,34 @@ class FocusFlowGUI:
             selectcolor=THEME["mantle"],
             activebackground=THEME["surface0"],
             activeforeground=THEME["green"],
-        ).pack(anchor="w", pady=(14, 6))
+        ).pack(anchor="w", pady=(14, 4))
+
+        self.notify_var = tk.BooleanVar(value=bool(self.config_store.notifications_enabled))
+        tk.Checkbutton(
+            card,
+            text="Enable native OS desktop notifications (synced with config.json)",
+            variable=self.notify_var,
+            font=("Segoe UI Semibold", 10),
+            fg=THEME["text"],
+            bg=THEME["surface0"],
+            selectcolor=THEME["mantle"],
+            activebackground=THEME["surface0"],
+            activeforeground=THEME["green"],
+        ).pack(anchor="w", pady=(2, 6))
+
+        sched_count = len(self.config_store.schedules)
+        hooks_summary = (
+            f"start={'on' if self.config_store.hooks.on_start else 'off'}, "
+            f"end={'on' if self.config_store.hooks.on_end else 'off'}"
+        )
+        self.lbl_automation_sync = tk.Label(
+            card,
+            text=f"CLI Automation Sync: {sched_count} recurring schedule(s) | Lifecycle hooks ({hooks_summary})",
+            font=("Consolas", 9),
+            fg=THEME["teal"],
+            bg=THEME["surface0"],
+        )
+        self.lbl_automation_sync.pack(anchor="w", pady=(2, 2))
 
         tk.Label(
             card,
@@ -1702,9 +1918,19 @@ class FocusFlowGUI:
 
             cfg = load_config(state_dir=self.state_dir)
             cfg.daily_goal_minutes = daily_goal
+            if hasattr(self, "notify_var"):
+                cfg.notifications_enabled = bool(self.notify_var.get())
             save_config(cfg, state_dir=self.state_dir)
             self.config_store = cfg
             self.spin_daily_goal.set(daily_goal)
+            if hasattr(self, "lbl_automation_sync"):
+                hooks_summary = (
+                    f"start={'on' if cfg.hooks.on_start else 'off'}, "
+                    f"end={'on' if cfg.hooks.on_end else 'off'}"
+                )
+                self.lbl_automation_sync.config(
+                    text=f"CLI Automation Sync: {len(cfg.schedules)} recurring schedule(s) | Lifecycle hooks ({hooks_summary})"
+                )
 
             if not self.is_active:
                 self.on_mode_change()

@@ -128,6 +128,7 @@ class AnalyticsSummary:
     total_blocked: int
     active_streak_days: int
     daily: list[DailyStat]
+    longest_streak_days: int = 0
     today_focus_minutes: int = 0
     daily_goal_minutes: int = DEFAULT_DAILY_GOAL_MINUTES
     daily_goal_progress_pct: float = 0.0
@@ -142,6 +143,7 @@ class AnalyticsSummary:
             "total_hours": round(self.total_hours, 2),
             "total_blocked": self.total_blocked,
             "active_streak_days": self.active_streak_days,
+            "longest_streak_days": self.longest_streak_days,
             "today_focus_minutes": self.today_focus_minutes,
             "daily_goal_minutes": self.daily_goal_minutes,
             "daily_goal_progress_pct": round(self.daily_goal_progress_pct, 2),
@@ -513,6 +515,25 @@ class SessionStore:
             streak += 1
             cursor = cursor - datetime.timedelta(days=1)
 
+        longest_streak = 0
+        if completed_dates:
+            run_len = 0
+            prev_date: datetime.date | None = None
+            for d_str in sorted(completed_dates):
+                try:
+                    cur_date = datetime.date.fromisoformat(d_str)
+                except ValueError:
+                    continue
+                if prev_date is not None and cur_date == prev_date + datetime.timedelta(days=1):
+                    run_len += 1
+                else:
+                    run_len = 1
+                if run_len > longest_streak:
+                    longest_streak = run_len
+                prev_date = cur_date
+        if streak > longest_streak:
+            longest_streak = streak
+
         daily: list[DailyStat] = []
         for offset in range(window - 1, -1, -1):
             d_str = (today - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
@@ -536,6 +557,7 @@ class SessionStore:
             total_hours=total_minutes / 60.0,
             total_blocked=total_blocked,
             active_streak_days=streak,
+            longest_streak_days=longest_streak,
             daily=daily,
             today_focus_minutes=today_focus_minutes,
             daily_goal_minutes=goal_minutes,

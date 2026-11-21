@@ -21,4 +21,4 @@ Describe what should have happened instead.
  - OS: [Windows 11 / Ubuntu 24.04 / macOS]
  - Go Version: [1.23+]
  - Python Version: [3.10+]
- - FocusFlow Version: [2.2.2]
+ - FocusFlow Version: [2.3.0]

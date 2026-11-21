@@ -7,17 +7,21 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 func buildLinuxNotifyCommand(ctx context.Context, binPath, title, body string) *exec.Cmd {
-	return exec.CommandContext(
+	// Escape XML/Pango markup in body since libnotify/notify-send parses body as Pango markup.
+	cmd := exec.CommandContext(
 		ctx,
 		binPath,
 		"--app-name=FocusFlow",
 		"--",
 		SanitizeNotificationText(title, 120),
-		SanitizeNotificationText(body, 256),
+		EscapeXMLText(SanitizeNotificationText(body, 256)),
 	)
+	cmd.WaitDelay = 250 * time.Millisecond
+	return cmd
 }
 
 func sendNativeNotification(ctx context.Context, title, body string) error {

@@ -208,3 +208,20 @@ func TestLookupPasswdHome_SudoUserResolution(t *testing.T) {
 		t.Fatalf("lookupPasswdHome(missing) = %q, want empty", got)
 	}
 }
+
+func TestStore_TimezoneLocalDayBucketingParity(t *testing.T) {
+	locPlus3 := time.FixedZone("UTC+3", 3*3600)
+
+	// UTC 2026-11-20T22:30:00Z is 2026-11-21 01:30 in UTC+3 -> MUST bucket to 2026-11-21
+	if got, ok := parseSessionLocalDate("2026-11-20T22:30:00Z", locPlus3); !ok || got != "2026-11-21" {
+		t.Fatalf("RFC3339 UTC late-night in UTC+3 = (%q, %v), want (2026-11-21, true)", got, ok)
+	}
+
+	// Naive local timestamp 2026-11-20T23:30:00 has no offset -> MUST stay on 2026-11-20 (matching Python!)
+	if got, ok := parseSessionLocalDate("2026-11-20T23:30:00", locPlus3); !ok || got != "2026-11-20" {
+		t.Fatalf("naive timestamp in UTC+3 = (%q, %v), want (2026-11-20, true)", got, ok)
+	}
+	if got, ok := parseSessionLocalDate("2026-11-20 23:30:00", locPlus3); !ok || got != "2026-11-20" {
+		t.Fatalf("naive space timestamp in UTC+3 = (%q, %v), want (2026-11-20, true)", got, ok)
+	}
+}

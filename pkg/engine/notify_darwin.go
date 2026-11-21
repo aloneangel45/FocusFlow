@@ -5,12 +5,13 @@ package engine
 import (
 	"context"
 	"os/exec"
+	"time"
 )
 
 // buildDarwinNotifyCommand uses `osascript` `on run argv` so title and body are passed
 // as raw argv parameters rather than interpolated into AppleScript source code.
 func buildDarwinNotifyCommand(ctx context.Context, title, body string) *exec.Cmd {
-	return exec.CommandContext(
+	cmd := exec.CommandContext(
 		ctx,
 		"osascript",
 		"-e", "on run argv",
@@ -20,6 +21,8 @@ func buildDarwinNotifyCommand(ctx context.Context, title, body string) *exec.Cmd
 		SanitizeNotificationText(title, 120),
 		SanitizeNotificationText(body, 256),
 	)
+	cmd.WaitDelay = 250 * time.Millisecond
+	return cmd
 }
 
 func sendNativeNotification(ctx context.Context, title, body string) error {

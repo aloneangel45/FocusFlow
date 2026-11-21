@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -173,7 +174,7 @@ func ParseClockTime(raw string) (int, int, string, error) {
 // ValidateRule validates and normalizes a ScheduleRule.
 func ValidateRule(r ScheduleRule) (ScheduleRule, error) {
 	name := strings.TrimSpace(r.Name)
-	if name == "" || len(name) > 64 {
+	if name == "" || utf8.RuneCountInString(name) > 64 {
 		return ScheduleRule{}, fmt.Errorf("%w: %q", ErrInvalidRuleName, r.Name)
 	}
 	for _, ch := range name {
@@ -261,8 +262,12 @@ func WindowForDate(rule ScheduleRule, date time.Time) (time.Time, time.Time, boo
 	if !rule.Enabled {
 		return time.Time{}, time.Time{}, false
 	}
+	normDays, err := NormalizeDays(rule.Days)
+	if err != nil {
+		return time.Time{}, time.Time{}, false
+	}
 	dayName := weekdayToCanonical[date.Weekday()]
-	if !containsDay(rule.Days, dayName) {
+	if !containsDay(normDays, dayName) {
 		return time.Time{}, time.Time{}, false
 	}
 	sh, sm, _, err1 := ParseClockTime(rule.StartTime)
@@ -278,7 +283,44 @@ func WindowForDate(rule ScheduleRule, date time.Time) (time.Time, time.Time, boo
 		endDate = date.AddDate(0, 0, 1)
 	}
 	end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), eh, em, 0, 0, loc)
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, false
+	}
 	return start, end, true
+}
+
+// IsActiveAt reports whether a single ScheduleRule is active at `now` (in `now`'s timezone),
+// including overnight windows that started on the previous calendar day.
+func IsActiveAt(rule ScheduleRule, now time.Time) bool {
+	if !rule.Enabled {
+		return false
+	}
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	for _, dayOffset := range []int{-1, 0} {
+		candidateDate := today.AddDate(0, 0, dayOffset)
+		start, end, ok := WindowForDate(rule, candidateDate)
+		if ok && !now.Before(start) && now.Before(end) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowPrecedes(cand, best *Window) bool {
+	if best == nil {
+		return true
+	}
+	if !cand.Start.Equal(best.Start) {
+		return cand.Start.Before(best.Start)
+	}
+	if !cand.End.Equal(best.End) {
+		return cand.End.Before(best.End)
+	}
+	if cand.Rule.Name != best.Rule.Name {
+		return cand.Rule.Name < best.Rule.Name
+	}
+	return cand.Rule.ID < best.Rule.ID
 }
 
 // ActiveWindow returns the currently active enabled schedule window at `now` (in `now`'s timezone),
@@ -300,10 +342,7 @@ func ActiveWindow(rules []ScheduleRule, now time.Time) *Window {
 			}
 			if !now.Before(start) && now.Before(end) {
 				cand := &Window{Rule: r, Start: start, End: end}
-				if best == nil ||
-					cand.Start.Before(best.Start) ||
-					(cand.Start.Equal(best.Start) && cand.End.Before(best.End)) ||
-					(cand.Start.Equal(best.Start) && cand.End.Equal(best.End) && cand.Rule.Name < best.Rule.Name) {
+				if windowPrecedes(cand, best) {
 					best = cand
 				}
 			}
@@ -332,10 +371,7 @@ func NextWindow(rules []ScheduleRule, now time.Time) *Window {
 			}
 			if start.After(now) {
 				cand := &Window{Rule: r, Start: start, End: end}
-				if best == nil ||
-					cand.Start.Before(best.Start) ||
-					(cand.Start.Equal(best.Start) && cand.End.Before(best.End)) ||
-					(cand.Start.Equal(best.Start) && cand.End.Equal(best.End) && cand.Rule.Name < best.Rule.Name) {
+				if windowPrecedes(cand, best) {
 					best = cand
 				}
 				break // earliest future occurrence for this rule found

@@ -326,7 +326,7 @@ class FocusFlowV222RegressionTests(unittest.TestCase):
     def test_v222_version_and_workflow_node24_alignment(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
         ver = focusflow_core.__version__
-        self.assertEqual(ver, "2.3.0")
+        self.assertEqual(ver, "2.3.1")
         self.assertIn(f"v{ver}", (repo_root / "FocusFlowGUI.py").read_text(encoding="utf-8"))
         self.assertIn(f"v{ver}", (repo_root / "Launch_FocusFlow_GUI.bat").read_text(encoding="utf-8"))
         self.assertIn(f'Version = "{ver}"', (repo_root / "cmd" / "focusflow" / "main.go").read_text(encoding="utf-8"))

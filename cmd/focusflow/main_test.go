@@ -882,3 +882,120 @@ func TestCLI_LifecycleHooksAndRollbackResilience(t *testing.T) {
 		t.Fatalf("hosts file still has managed markers after failing --on-end hook:\n%s", string(rawHosts))
 	}
 }
+
+func TestCLI_ScheduleDaemonDeletedProfileSleepWakeAndInvalidStrict(t *testing.T) {
+	_, hostsPath := setupHermeticCLIEnv(t)
+	t.Setenv("FOCUSFLOW_NO_NOTIFY", "1")
+
+	// 1. Invalid --strict rejected immediately
+	var badOut, badErr bytes.Buffer
+	sigBad := make(chan os.Signal, 1)
+	if code := runScheduleDaemonWithSignals([]string{"--strict", "nonsense"}, &badOut, &badErr, sigBad, time.Now); code == 0 {
+		t.Fatalf("expected invalid --strict to fail fast")
+	}
+
+	// 2. Deleted profile fallback warning + wake-from-sleep past window end releases hosts cleanly without crediting sleep
+	cfg, err := profile.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cfg.Schedules = []schedule.ScheduleRule{
+		{
+			ID:        "sch-deleted-prof",
+			Name:      "Orphaned Profile Window",
+			Days:      []string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"},
+			StartTime: "10:00",
+			EndTime:   "10:30",
+			Profile:   "deleted-custom-profile",
+			Enabled:   true,
+		},
+	}
+	if err := profile.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	var mu sync.Mutex
+	simNow := time.Date(2026, 11, 20, 10, 20, 0, 0, time.Local)
+	nowFn := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return simNow
+	}
+
+	var outMu sync.Mutex
+	var rawOut, rawErr bytes.Buffer
+	dOut := &lockedBuffer{mu: &outMu, buf: &rawOut}
+	dErr := &lockedBuffer{mu: &outMu, buf: &rawErr}
+	sigChan := make(chan os.Signal, 1)
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runScheduleDaemonWithSignals(
+			[]string{"--check-interval", "40ms", "--no-notify"},
+			dOut,
+			dErr,
+			sigChan,
+			nowFn,
+		)
+	}()
+
+	// Wait for hosts sinkhole engagement
+	deadline := time.Now().Add(5 * time.Second)
+	engaged := false
+	for time.Now().Before(deadline) {
+		rawHosts, _ := os.ReadFile(hostsPath)
+		if engine.HasManagedMarkers(string(rawHosts)) {
+			engaged = true
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if !engaged {
+		sigChan <- os.Interrupt
+		<-doneCh
+		t.Fatalf("daemon did not engage hosts for fallback profile")
+	}
+
+	// Simulate laptop sleeping for 3 hours and waking long past 10:30 window end!
+	mu.Lock()
+	simNow = time.Date(2026, 11, 20, 13, 30, 0, 0, time.Local)
+	mu.Unlock()
+
+	deadline = time.Now().Add(5 * time.Second)
+	released := false
+	for time.Now().Before(deadline) {
+		rawHosts, _ := os.ReadFile(hostsPath)
+		if !engine.HasManagedMarkers(string(rawHosts)) {
+			released = true
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	sigChan <- os.Interrupt
+	exitCode := <-doneCh
+
+	if !released || exitCode != 0 {
+		t.Fatalf("expected clean hosts release on wake-from-sleep (released=%v exit=%d)", released, exitCode)
+	}
+	outMu.Lock()
+	errText := rawErr.String()
+	outText := rawOut.String()
+	outMu.Unlock()
+	if !strings.Contains(errText, "missing/deleted profile 'deleted-custom-profile'") {
+		t.Errorf("expected missing/deleted profile warning on stderr, got: %q", errText)
+	}
+	if !strings.Contains(outText, "System sleep/wake detected") {
+		t.Errorf("expected sleep/wake detection log, got: %q", outText)
+	}
+
+	store, _ := storage.NewStore()
+	sessions, _ := store.LoadSessions()
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session record, got %+v", sessions)
+	}
+	if sessions[0].Completed || sessions[0].Status != "aborted" || sessions[0].Profile != "study" {
+		t.Errorf("expected wake-from-sleep session finalized as aborted on fallback study profile, got %+v", sessions[0])
+	}
+	if sessions[0].PlannedMinutes != 10 {
+		t.Errorf("expected mid-window planned_minutes=10 (10:20..10:30), got %d", sessions[0].PlannedMinutes)
+	}
+}

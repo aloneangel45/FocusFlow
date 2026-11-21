@@ -126,21 +126,37 @@ class ScheduleRule:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "ScheduleRule":
-        raw_name = str(data.get("name") or "").strip()
+        raw_name_val = data.get("name")
+        if not isinstance(raw_name_val, str):
+            raise ValueError("schedule name must be a string")
+        raw_name = raw_name_val.strip()
         if not raw_name or len(raw_name) > 64 or any(ord(c) < 32 or ord(c) == 127 for c in raw_name):
             raise ValueError(f"invalid schedule name {raw_name!r}")
         raw_days = data.get("days")
-        if not isinstance(raw_days, (list, tuple, str)):
+        if isinstance(raw_days, str):
+            days = parse_schedule_days(raw_days)
+        elif isinstance(raw_days, (list, tuple)):
+            if not raw_days or not all(isinstance(x, str) for x in raw_days):
+                raise ValueError("invalid schedule days")
+            days = parse_schedule_days(list(raw_days))
+        else:
             raise ValueError("invalid schedule days")
-        days = parse_schedule_days(raw_days)
-        start_time = _normalize_clock_time(data.get("start_time"))
-        end_time = _normalize_clock_time(data.get("end_time"))
+        raw_start = data.get("start_time")
+        raw_end = data.get("end_time")
+        if not isinstance(raw_start, str) or not isinstance(raw_end, str):
+            raise ValueError("schedule start_time and end_time must be strings")
+        start_time = _normalize_clock_time(raw_start)
+        end_time = _normalize_clock_time(raw_end)
         if start_time == end_time:
             raise ValueError("schedule start_time and end_time cannot be identical")
-        prof = _resolve_profile_alias(str(data.get("profile") or ""))
+        raw_prof = data.get("profile")
+        if not isinstance(raw_prof, str):
+            raise ValueError("schedule profile must be a string")
+        prof = _resolve_profile_alias(raw_prof)
         if not prof:
             raise ValueError("schedule profile cannot be empty")
-        raw_id = str(data.get("id") or "").strip() or f"sch-{os.urandom(4).hex()}"
+        raw_id_val = data.get("id")
+        raw_id = raw_id_val.strip() if isinstance(raw_id_val, str) and raw_id_val.strip() else f"sch-{os.urandom(4).hex()}"
         raw_enabled = data.get("enabled", True)
         enabled = bool(raw_enabled) if isinstance(raw_enabled, bool) else True
         return cls(
@@ -271,8 +287,8 @@ class FocusProfile:
     def from_dict(cls, key: str, data: dict[str, object]) -> "FocusProfile":
         raw_domains = data.get("blocked_domains")
         raw_procs = data.get("blocked_processes")
-        domains_list = [str(x) for x in raw_domains if x is not None] if isinstance(raw_domains, (list, tuple)) else []
-        procs_list = [str(x) for x in raw_procs if x is not None] if isinstance(raw_procs, (list, tuple)) else []
+        domains_list = [x for x in raw_domains if isinstance(x, str)] if isinstance(raw_domains, (list, tuple)) else []
+        procs_list = [x for x in raw_procs if isinstance(x, str)] if isinstance(raw_procs, (list, tuple)) else []
 
         raw_work = data.get("default_work_minutes", 25)
         try:
@@ -295,9 +311,9 @@ class FocusProfile:
             break_min = 120
 
         raw_name = data.get("name")
-        clean_name = str(raw_name).strip().lower() if raw_name is not None else ""
+        clean_name = raw_name.strip().lower() if isinstance(raw_name, str) else ""
         raw_desc = data.get("description")
-        clean_desc = str(raw_desc) if raw_desc is not None else ""
+        clean_desc = raw_desc if isinstance(raw_desc, str) else ""
 
         return cls(
             name=clean_name or key,
@@ -672,8 +688,8 @@ def load_config(state_dir: str | None = None) -> ConfigStore:
             profiles_map[key] = default_prof
 
     return ConfigStore(
-        custom_domains=sanitize_domains([str(x) for x in raw_domains if x is not None]),
-        custom_processes=_sanitize_process_list([str(x) for x in raw_procs if x is not None]),
+        custom_domains=sanitize_domains([x for x in raw_domains if isinstance(x, str)]),
+        custom_processes=_sanitize_process_list([x for x in raw_procs if isinstance(x, str)]),
         profiles=profiles_map,
         daily_goal_minutes=daily_goal,
         notifications_enabled=notifications_enabled,

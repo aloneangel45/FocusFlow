@@ -80,23 +80,33 @@ func FormatHeatmap(
 	}
 
 	minutesByDate := make(map[string]int, len(daily))
-	totalWindowMin := 0
-	activeDays := 0
 	for _, stat := range daily {
-		minutesByDate[stat.Date] = stat.Minutes
-		totalWindowMin += stat.Minutes
 		if stat.Minutes > 0 {
-			activeDays++
+			minutesByDate[stat.Date] += stat.Minutes
 		}
 	}
 
 	startDay := endDay.AddDate(0, 0, -(windowDays - 1))
+	totalWindowMin := 0
+	activeDays := 0
+	for i := 0; i < windowDays; i++ {
+		dKey := startDay.AddDate(0, 0, i).Format("2006-01-02")
+		if mins := minutesByDate[dKey]; mins > 0 {
+			totalWindowMin += mins
+			activeDays++
+		}
+	}
+
 	// Align grid start to the Monday on or before startDay
 	gridStart := startDay.AddDate(0, 0, -weekdayRowMondayFirst(startDay.Weekday()))
 	// Align grid end to the Sunday on or after endDay
 	gridEnd := endDay.AddDate(0, 0, 6-weekdayRowMondayFirst(endDay.Weekday()))
 
-	totalGridDays := int(gridEnd.Sub(gridStart).Hours()/24.0) + 1
+	// Use pure UTC calendar midnights so DST spring-forward/fall-back transitions
+	// never introduce fractional-hour drift in week counts.
+	gridStartUTC := time.Date(gridStart.Year(), gridStart.Month(), gridStart.Day(), 0, 0, 0, 0, time.UTC)
+	gridEndUTC := time.Date(gridEnd.Year(), gridEnd.Month(), gridEnd.Day(), 0, 0, 0, 0, time.UTC)
+	totalGridDays := int(gridEndUTC.Sub(gridStartUTC)/(24*time.Hour)) + 1
 	numWeeks := (totalGridDays + 6) / 7
 	if numWeeks < 1 {
 		numWeeks = 1

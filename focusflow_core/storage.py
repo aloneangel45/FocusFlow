@@ -157,7 +157,7 @@ def _parse_session_local_date(ts: str, tz: datetime.tzinfo | None) -> str | None
         return None
     if len(s) == 10 and s[4] == "-" and s[7] == "-":
         return s
-    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+    iso = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
     try:
         dt = datetime.datetime.fromisoformat(iso)
         if dt.tzinfo is not None and tz is not None:
@@ -461,7 +461,9 @@ class SessionStore:
     ) -> AnalyticsSummary:
         """Compute genuine streak, total focus hours, daily goal progress, completion rate, and N-day bar chart."""
         window = days if days > 0 else 7
-        ref_now = now or datetime.datetime.now().astimezone()
+        ref_now = now if now is not None else datetime.datetime.now().astimezone()
+        if ref_now.tzinfo is None:
+            ref_now = ref_now.astimezone()
         tz = ref_now.tzinfo
         today = ref_now.date()
 
@@ -569,7 +571,9 @@ class SessionStore:
         days: int = 7,
         now: datetime.datetime | None = None,
     ) -> str:
-        ref = now or datetime.datetime.now().astimezone()
+        ref = now if now is not None else datetime.datetime.now().astimezone()
+        if ref.tzinfo is None:
+            ref = ref.astimezone()
         sessions = self.load_sessions()
         summary = self.compute_analytics(days=days, now=ref)
         payload = {

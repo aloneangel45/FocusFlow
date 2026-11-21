@@ -2,7 +2,7 @@
 # Usage:
 #   irm https://raw.githubusercontent.com/aloneangel45/FocusFlow/main/install.ps1 | iex
 # Optional environment variables:
-#   $env:FOCUSFLOW_VERSION        Release tag to install (e.g. "v2.3.0" or "latest", default: "latest")
+#   $env:FOCUSFLOW_VERSION        Release tag to install (e.g. "v2.3.1" or "latest", default: "latest")
 #   $env:FOCUSFLOW_INSTALL_DIR    Target installation directory (default: "$env:LOCALAPPDATA\Programs\FocusFlow")
 #   $env:FOCUSFLOW_REPO           GitHub owner/repo (default: "aloneangel45/FocusFlow")
 #   $env:FOCUSFLOW_BASE_URL       Override release download base URL (for mirrors/testing)
@@ -64,7 +64,7 @@ function Remove-FocusFlowDirectorySafe([string]$DirPath) {
 function Invoke-FocusFlowDownload([string]$Uri, [string]$DestinationPath) {
     $wc = New-Object System.Net.WebClient
     try {
-        $wc.Headers.Add('User-Agent', 'FocusFlow-Installer/2.3.0')
+        $wc.Headers.Add('User-Agent', 'FocusFlow-Installer/2.3.1')
         $wc.DownloadFile($Uri, $DestinationPath)
     } finally {
         $wc.Dispose()

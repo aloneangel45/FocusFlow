@@ -45,14 +45,15 @@ func buildPlatformHookCommand(ctx context.Context, command string, opts HookOpti
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	env := os.Environ()
+	sysAttr := &syscall.SysProcAttr{
+		Setpgid: true,
+	}
 
 	if drop {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{
-				Uid:         uid,
-				Gid:         gid,
-				NoSetGroups: true,
-			},
+		sysAttr.Credential = &syscall.Credential{
+			Uid:         uid,
+			Gid:         gid,
+			NoSetGroups: true,
 		}
 		if usr, lookupErr := user.LookupId(strconv.FormatUint(uint64(uid), 10)); lookupErr == nil && usr != nil {
 			if strings.TrimSpace(usr.HomeDir) != "" {
@@ -63,6 +64,19 @@ func buildPlatformHookCommand(ctx context.Context, command string, opts HookOpti
 				env = replaceEnvVar(env, "LOGNAME", usr.Username)
 			}
 		}
+	}
+
+	cmd.SysProcAttr = sysAttr
+	// On timeout/cancellation, SIGKILL the entire child process group so background
+	// grandchild processes spawned by `sh -c` cannot linger or hold stdout/stderr pipes open.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
 	}
 
 	cmd.Env = env

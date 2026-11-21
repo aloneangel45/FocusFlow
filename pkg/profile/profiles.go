@@ -176,6 +176,236 @@ func newDefaultConfigStore() *ConfigStore {
 	}
 }
 
+func isJSONNull(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+func unmarshalStringStrict(raw json.RawMessage) (string, bool) {
+	if isJSONNull(raw) {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+func unmarshalBoolStrict(raw json.RawMessage) (bool, bool) {
+	if isJSONNull(raw) {
+		return false, false
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false, false
+	}
+	return b, true
+}
+
+func unmarshalIntStrict(raw json.RawMessage) (int, bool) {
+	if isJSONNull(raw) {
+		return 0, false
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func unmarshalStringSliceLenient(raw json.RawMessage) []string {
+	if isJSONNull(raw) {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := unmarshalStringStrict(item); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func unmarshalSchedulesLenient(raw json.RawMessage) []schedule.ScheduleRule {
+	if isJSONNull(raw) {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil
+	}
+	out := make([]schedule.ScheduleRule, 0, len(items))
+	for _, item := range items {
+		if isJSONNull(item) {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(item, &fields); err != nil || fields == nil {
+			continue
+		}
+		var r schedule.ScheduleRule
+		r.Enabled = true // default enabled when omitted, null, or non-bool, matching Python
+
+		if v, ok := fields["id"]; ok {
+			if id, valid := unmarshalStringStrict(v); valid {
+				r.ID = id
+			}
+		}
+		if name, valid := unmarshalStringStrict(fields["name"]); valid {
+			r.Name = name
+		} else {
+			continue
+		}
+		if v, ok := fields["days"]; ok && !isJSONNull(v) {
+			var rawDayItems []json.RawMessage
+			if err := json.Unmarshal(v, &rawDayItems); err == nil {
+				if len(rawDayItems) == 0 {
+					continue
+				}
+				allStrings := true
+				daysSlice := make([]string, 0, len(rawDayItems))
+				for _, di := range rawDayItems {
+					if ds, valid := unmarshalStringStrict(di); valid {
+						daysSlice = append(daysSlice, ds)
+					} else {
+						allStrings = false
+						break
+					}
+				}
+				if !allStrings {
+					continue
+				}
+				r.Days = daysSlice
+			} else if daysStr, valid := unmarshalStringStrict(v); valid {
+				r.Days = []string{daysStr}
+			} else {
+				continue
+			}
+		} else {
+			continue
+		}
+		if st, valid := unmarshalStringStrict(fields["start_time"]); valid {
+			r.StartTime = st
+		} else {
+			continue
+		}
+		if et, valid := unmarshalStringStrict(fields["end_time"]); valid {
+			r.EndTime = et
+		} else {
+			continue
+		}
+		if prof, valid := unmarshalStringStrict(fields["profile"]); valid {
+			r.Profile = prof
+		} else {
+			continue
+		}
+		if v, ok := fields["enabled"]; ok {
+			if enabled, valid := unmarshalBoolStrict(v); valid {
+				r.Enabled = enabled
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func unmarshalHooksLenient(raw json.RawMessage) engine.HooksConfig {
+	var out engine.HooksConfig
+	if isJSONNull(raw) {
+		return out
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return out
+	}
+	if s, ok := unmarshalStringStrict(fields["on_start"]); ok {
+		out.OnStart = s
+	}
+	if s, ok := unmarshalStringStrict(fields["on_end"]); ok {
+		out.OnEnd = s
+	}
+	if s, ok := unmarshalStringStrict(fields["on_break"]); ok {
+		out.OnBreak = s
+	}
+	return out
+}
+
+func unmarshalProfilesLenient(raw json.RawMessage) map[string]*FocusProfile {
+	if isJSONNull(raw) {
+		return nil
+	}
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawMap); err != nil || rawMap == nil {
+		return nil
+	}
+	out := make(map[string]*FocusProfile, len(rawMap))
+	for k, v := range rawMap {
+		if isJSONNull(v) {
+			continue
+		}
+		var pFields map[string]json.RawMessage
+		if err := json.Unmarshal(v, &pFields); err != nil || pFields == nil {
+			continue
+		}
+		prof := &FocusProfile{
+			DefaultWorkMinutes:  25,
+			DefaultBreakMinutes: 5,
+		}
+		if s, ok := unmarshalStringStrict(pFields["name"]); ok {
+			prof.Name = s
+		}
+		if s, ok := unmarshalStringStrict(pFields["description"]); ok {
+			prof.Description = s
+		}
+		if f, ok := pFields["blocked_domains"]; ok {
+			prof.BlockedDomains = unmarshalStringSliceLenient(f)
+		}
+		if f, ok := pFields["blocked_processes"]; ok {
+			prof.BlockedProcesses = unmarshalStringSliceLenient(f)
+		}
+		if wm, ok := unmarshalIntStrict(pFields["default_work_minutes"]); ok {
+			prof.DefaultWorkMinutes = wm
+		}
+		if bm, ok := unmarshalIntStrict(pFields["default_break_minutes"]); ok {
+			prof.DefaultBreakMinutes = bm
+		}
+		out[k] = prof
+	}
+	return out
+}
+
+func decodeRawConfigCompat(trimmed []byte) (rawConfigCompat, bool) {
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return rawConfigCompat{}, false
+	}
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &rawMap); err != nil || rawMap == nil {
+		return rawConfigCompat{}, false
+	}
+
+	var compat rawConfigCompat
+	compat.CustomDomains = unmarshalStringSliceLenient(rawMap["custom_domains"])
+	compat.CustomProcesses = unmarshalStringSliceLenient(rawMap["custom_processes"])
+	compat.CustomSites = unmarshalStringSliceLenient(rawMap["custom_sites"])
+	compat.CustomApps = unmarshalStringSliceLenient(rawMap["custom_apps"])
+
+	if goal, ok := unmarshalIntStrict(rawMap["daily_goal_minutes"]); ok {
+		compat.DailyGoalMinutes = goal
+	}
+	if b, ok := unmarshalBoolStrict(rawMap["notifications_enabled"]); ok {
+		compat.NotificationsEnabled = &b
+	}
+	compat.Schedules = unmarshalSchedulesLenient(rawMap["schedules"])
+	compat.Hooks = unmarshalHooksLenient(rawMap["hooks"])
+	compat.Profiles = unmarshalProfilesLenient(rawMap["profiles"])
+	return compat, true
+}
+
 func LoadConfig() (*ConfigStore, error) {
 	const maxReadAttempts = 3
 	const readRetryBackoff = 25 * time.Millisecond
@@ -217,8 +447,8 @@ func LoadConfig() (*ConfigStore, error) {
 			return cfg, nil
 		}
 
-		compat = rawConfigCompat{}
-		if trimmed[0] == '{' && json.Unmarshal(trimmed, &compat) == nil {
+		if decoded, ok := decodeRawConfigCompat(trimmed); ok {
+			compat = decoded
 			parsed = true
 			break
 		}

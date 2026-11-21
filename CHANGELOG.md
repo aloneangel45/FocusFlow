@@ -2,6 +2,14 @@
 
 All notable changes to FocusFlow are documented in this file.
 
+## [2.3.1] - 2026-11-21
+
+### Fixed
+- **Recurring Schedules & Daemon Hardening (`pkg/schedule/schedule.go`, `cmd/focusflow/main.go`):** Added `IsActiveAt`, normalized unnormalized `rule.Days` inside `WindowForDate`, guarded DST spring-forward zero/negative windows, aligned UTF-8 rune length validation with Python, and completed deterministic overlap tie-breaking (`Start` -> `End` -> `Name` -> `ID`). In `focusflow schedule run`, added fast `--strict` validation, explicit warnings when falling back from deleted profiles to `study`, hosts-before-`StartSession` ordering and external-stop hosts rollback, accurate remaining-duration planning on mid-window entry, wake-from-sleep detection past `win.End` (immediate shield rollback without crediting sleep hours), and bounded pruning of `handledWindows`.
+- **Lifecycle Hooks Process-Tree Cleanup, Privilege & Race Hardening (`pkg/engine/hooks*.go`):** Hardened `ResolvePosixHookPrivilege` to reject `SUDO_GID=0` and `math.MaxUint32` (`(uid_t)-1`) sentinel values; added `Setpgid: true` + `-pgid` `SIGKILL` cancellation on POSIX and `taskkill.exe /T /F` child-tree cancellation + newline normalization on Windows; rejected NUL bytes in hook commands; and mutex-protected `limitedBuffer` to eliminate race conditions after `WaitDelay`.
+- **Desktop Notifications Escaping & Bounded Concurrency (`pkg/engine/notify*.go`):** Added bounded in-flight concurrency (`DefaultMaxConcurrentNotifications = 4`) to `Notifier.SendAsync` so bursts never leak goroutines; hardened `SanitizeNotificationText` against C1 control characters, `\u2028`/`\u2029` separators, and `\uFFFE`/`\uFFFF`; escaped PowerShell Unicode smart single quotes (`\u2018`..`\u201B`) in `EscapePowerShellSingleQuoted`; escaped Pango XML markup in Linux `notify-send` body; deduplicated Windows `FOCUSFLOW_NOTIFY_*` env vars, fixed empty-body WinForms BalloonTip crash, and set `WaitDelay` across all OS notification runners.
+- **Malformed `config.json` Graceful Degradation, Timezone Day-Bucketing & Heatmap Edge Cases (`pkg/profile/profiles.go`, `pkg/storage/store.go`, `pkg/tui/heatmap.go`, `focusflow_core/config.py`, `focusflow_core/storage.py`, `FocusFlowGUI.py`):** Replaced rigid full-struct `config.json` unmarshaling in Go with per-field lenient decoding so wrong-typed fields (`schedules: null`, `schedules: "bad"`, `hooks: null`, `notifications_enabled: "invalid"`) degrade cleanly without wiping valid settings; enforced strict string typing in Python `ScheduleRule.from_dict`; aligned Go and Python local day-bucketing for naive timestamps, lowercase `'z'` RFC3339, and naive `now` arguments; made Go heatmap week counts DST-safe via UTC calendar midnights with exact in-window totals; and hardened `FocusFlowGUI.py` heatmap resize bounds, empty-state rendering, midnight date alignment, canvas `<Leave>` hover reset, and System tab sync.
+
 ## [2.3.0] - 2026-11-21
 
 ### Added

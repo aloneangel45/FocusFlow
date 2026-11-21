@@ -5,25 +5,34 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
-const DefaultNotifyTimeout = 5 * time.Second
+const (
+	DefaultNotifyTimeout              = 5 * time.Second
+	DefaultMaxConcurrentNotifications = 4
+)
 
-// Notifier dispatches non-blocking native OS desktop notifications.
+// Notifier dispatches non-blocking native OS desktop notifications with bounded concurrency.
 // Notification failures are always swallowed so focus sessions are never blocked or aborted.
 type Notifier struct {
-	Enabled bool
-	Timeout time.Duration
-	sendFn  func(ctx context.Context, title, body string) error
+	Enabled       bool
+	Timeout       time.Duration
+	MaxConcurrent int
+	sendFn        func(ctx context.Context, title, body string) error
+
+	mu       sync.Mutex
+	inFlight int
 }
 
 // NewNotifier creates a native OS notifier. Passing enabled=false disables all notifications.
 func NewNotifier(enabled bool) *Notifier {
 	return &Notifier{
-		Enabled: enabled,
-		Timeout: DefaultNotifyTimeout,
-		sendFn:  sendNativeNotification,
+		Enabled:       enabled,
+		Timeout:       DefaultNotifyTimeout,
+		MaxConcurrent: DefaultMaxConcurrentNotifications,
+		sendFn:        sendNativeNotification,
 	}
 }
 
@@ -32,16 +41,16 @@ func isNotifySuppressedByEnv() bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-// SanitizeNotificationText strips NUL and control characters, collapses whitespace newlines,
-// and bounds length to maxRunes to ensure safe native OS notification arguments.
+// SanitizeNotificationText strips NUL, C0/C1 control characters, and XML-illegal code points,
+// collapses whitespace/line separators, and bounds length to maxRunes for safe OS notifications.
 func SanitizeNotificationText(s string, maxRunes int) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
-		case r == '\r' || r == '\n' || r == '\t':
+		case r == '\r' || r == '\n' || r == '\t' || r == '\u2028' || r == '\u2029':
 			b.WriteByte(' ')
-		case r < 0x20 || r == 0x7f:
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == '\ufffe' || r == '\uffff':
 			continue
 		default:
 			b.WriteRune(r)
@@ -57,11 +66,18 @@ func SanitizeNotificationText(s string, maxRunes int) string {
 	return cleaned
 }
 
-// EscapePowerShellSingleQuoted sanitizes control characters and escapes single quotes
-// for safe embedding inside a PowerShell single-quoted literal.
+// EscapePowerShellSingleQuoted sanitizes control characters and escapes ASCII and Unicode
+// single-quote delimiters (which PowerShell parses as single-quoted string terminators).
 func EscapePowerShellSingleQuoted(s string) string {
 	clean := SanitizeNotificationText(s, 256)
-	return strings.ReplaceAll(clean, "'", "''")
+	replacer := strings.NewReplacer(
+		"'", "''",
+		"\u2018", "''",
+		"\u2019", "''",
+		"\u201a", "''",
+		"\u201b", "''",
+	)
+	return replacer.Replace(clean)
 }
 
 // EscapeAppleScriptString sanitizes control characters and escapes backslashes and double
@@ -117,12 +133,39 @@ func (n *Notifier) Send(ctx context.Context, title, body string) error {
 	return fn(tctx, cleanTitle, cleanBody)
 }
 
-// SendAsync dispatches a notification in a detached goroutine without blocking the caller.
+func (n *Notifier) tryAcquireSlot() bool {
+	limit := n.MaxConcurrent
+	if limit <= 0 {
+		limit = DefaultMaxConcurrentNotifications
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.inFlight >= limit {
+		return false
+	}
+	n.inFlight++
+	return true
+}
+
+func (n *Notifier) releaseSlot() {
+	n.mu.Lock()
+	if n.inFlight > 0 {
+		n.inFlight--
+	}
+	n.mu.Unlock()
+}
+
+// SendAsync dispatches a notification in a bounded detached goroutine without blocking the caller.
+// Excess burst notifications beyond MaxConcurrent are dropped cleanly to prevent goroutine leaks.
 func (n *Notifier) SendAsync(title, body string) {
 	if n == nil || !n.Enabled || isNotifySuppressedByEnv() {
 		return
 	}
+	if !n.tryAcquireSlot() {
+		return
+	}
 	go func() {
+		defer n.releaseSlot()
 		_ = n.Send(context.Background(), title, body)
 	}()
 }

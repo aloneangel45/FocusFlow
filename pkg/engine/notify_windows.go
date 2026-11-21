@@ -6,7 +6,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
+	"time"
 )
 
 // windowsNotifyScript reads title and body strictly from process environment variables
@@ -17,6 +19,7 @@ $ErrorActionPreference = 'Stop'
 $title = $env:FOCUSFLOW_NOTIFY_TITLE
 $body = $env:FOCUSFLOW_NOTIFY_BODY
 if ([string]::IsNullOrWhiteSpace($title)) { $title = 'FocusFlow' }
+if ([string]::IsNullOrWhiteSpace($body)) { $body = $title }
 try {
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
     [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -47,6 +50,23 @@ try {
 }
 `
 
+func replaceEnvCaseInsensitive(baseEnv []string, overrides map[string]string) []string {
+	out := make([]string, 0, len(baseEnv)+len(overrides))
+	for _, entry := range baseEnv {
+		eqIdx := strings.IndexByte(entry, '=')
+		if eqIdx > 0 {
+			if _, ok := overrides[strings.ToUpper(entry[:eqIdx])]; ok {
+				continue
+			}
+		}
+		out = append(out, entry)
+	}
+	for k, v := range overrides {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
 func buildWindowsNotifyCommand(ctx context.Context, title, body string) *exec.Cmd {
 	cmd := exec.CommandContext(
 		ctx,
@@ -58,11 +78,11 @@ func buildWindowsNotifyCommand(ctx context.Context, title, body string) *exec.Cm
 		"-Command", windowsNotifyScript,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	cmd.Env = append(
-		os.Environ(),
-		"FOCUSFLOW_NOTIFY_TITLE="+SanitizeNotificationText(title, 120),
-		"FOCUSFLOW_NOTIFY_BODY="+SanitizeNotificationText(body, 256),
-	)
+	cmd.WaitDelay = 250 * time.Millisecond
+	cmd.Env = replaceEnvCaseInsensitive(os.Environ(), map[string]string{
+		"FOCUSFLOW_NOTIFY_TITLE": SanitizeNotificationText(title, 120),
+		"FOCUSFLOW_NOTIFY_BODY":  SanitizeNotificationText(body, 256),
+	})
 	return cmd
 }
 

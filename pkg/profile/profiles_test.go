@@ -295,3 +295,89 @@ func TestProfiles_V230SchemaNotificationsSchedulesAndHooks(t *testing.T) {
 		t.Errorf("schedules did not round-trip: %+v", reloaded.Schedules)
 	}
 }
+
+func TestProfiles_AdversarialMalformedFieldsDegradeGracefully(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("FOCUSFLOW_HOME", tmpDir)
+	cfgPath := GetConfigPath()
+
+	// Case 1: Wrong field types for schedules, hooks, notifications_enabled, and partial bad profiles
+	// MUST preserve valid custom_domains, daily_goal_minutes, and valid custom profiles without wiping config.json!
+	adversarial := `{
+  "custom_domains": ["reddit.com", 123, null, "twitter.com"],
+  "custom_processes": ["discord.exe", false],
+  "daily_goal_minutes": 150,
+  "notifications_enabled": "invalid",
+  "schedules": "bad",
+  "hooks": null,
+  "profiles": {
+    "good-custom": {
+      "name": "good-custom",
+      "description": "Kept intact",
+      "blocked_domains": ["youtube.com"],
+      "blocked_processes": ["steam.exe"],
+      "default_work_minutes": 40,
+      "default_break_minutes": 8
+    },
+    "bad-null": null,
+    "bad-str": "not-an-object"
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(adversarial), 0644); err != nil {
+		t.Fatalf("write adversarial config: %v", err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed on adversarial config: %v", err)
+	}
+	if cfg.DailyGoalMinutes != 150 {
+		t.Errorf("expected daily_goal_minutes=150 preserved, got %d", cfg.DailyGoalMinutes)
+	}
+	if !cfg.NotificationsEnabled {
+		t.Errorf("expected invalid notifications_enabled string to degrade to true")
+	}
+	if len(cfg.Schedules) != 0 {
+		t.Errorf("expected bad schedules string to degrade to empty slice, got %+v", cfg.Schedules)
+	}
+	if cfg.Hooks.OnStart != "" || cfg.Hooks.OnEnd != "" {
+		t.Errorf("expected null hooks to degrade to empty HooksConfig, got %+v", cfg.Hooks)
+	}
+	if len(cfg.CustomDomains) != 2 {
+		t.Errorf("expected 2 valid custom domains preserved, got %v", cfg.CustomDomains)
+	}
+	if p, ok := cfg.GetProfile("good-custom"); !ok || p.DefaultWorkMinutes != 40 {
+		t.Errorf("expected valid custom profile preserved, got %+v (ok=%v)", p, ok)
+	}
+	if _, statErr := os.Stat(cfgPath + ".corrupt.bak"); !os.IsNotExist(statErr) {
+		t.Errorf("did not expect .corrupt.bak for valid JSON with wrong field types")
+	}
+
+	// Case 2: schedules: null and mixed valid/invalid schedule items + partial bad hook fields
+	mixed := `{
+  "daily_goal_minutes": "not-a-number",
+  "notifications_enabled": null,
+  "schedules": [
+    {"id": "sch-ok", "name": "Valid Rule", "days": "mon-fri", "start_time": "09:00", "end_time": "11:00", "profile": "dev"},
+    "not-an-object",
+    {"name": 999, "days": ["mon"], "start_time": "09:00", "end_time": "10:00", "profile": "dev"},
+    {"name": "Bad Time", "days": ["mon"], "start_time": "25:00", "end_time": "10:00", "profile": "dev"}
+  ],
+  "hooks": {"on_start": 42, "on_end": "echo ok"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(mixed), 0644); err != nil {
+		t.Fatalf("write mixed config: %v", err)
+	}
+	cfg2, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed on mixed config: %v", err)
+	}
+	if cfg2.DailyGoalMinutes != DefaultDailyGoalMinutes || !cfg2.NotificationsEnabled {
+		t.Errorf("expected defaults for bad goal/notify, got goal=%d notify=%v", cfg2.DailyGoalMinutes, cfg2.NotificationsEnabled)
+	}
+	if len(cfg2.Schedules) != 1 || cfg2.Schedules[0].ID != "sch-ok" || !cfg2.Schedules[0].Enabled {
+		t.Errorf("expected 1 valid schedule preserved with enabled=true default, got %+v", cfg2.Schedules)
+	}
+	if cfg2.Hooks.OnStart != "" || cfg2.Hooks.OnEnd != "echo ok" {
+		t.Errorf("expected valid hook field preserved while bad field ignored, got %+v", cfg2.Hooks)
+	}
+}

@@ -94,3 +94,33 @@ func TestFormatHeatmap_ANSIAndASCIIDegradation(t *testing.T) {
 		t.Errorf("expected ShouldUseColor(false) == true when NO_COLOR is unset")
 	}
 }
+
+func TestFormatHeatmap_DSTEmptyAndDuplicateDates(t *testing.T) {
+	// 1. Empty daily slice still renders a valid 90-day grid with 0/90 active days
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	emptyOut := FormatHeatmap(nil, 120, 0, 0, now, false)
+	if !strings.Contains(emptyOut, "90-Day Focus Contribution Heatmap") || !strings.Contains(emptyOut, "Active Days: 0/90 (0 min)") {
+		t.Errorf("unexpected empty heatmap output:\n%s", emptyOut)
+	}
+
+	// 2. Duplicate dates sum cleanly and match footer totals (ignoring out-of-window dates)
+	daily := []storage.DailyStat{
+		{Date: "2026-04-14", Minutes: 30, Sprints: 1},
+		{Date: "2026-04-15", Minutes: 40, Sprints: 1},
+		{Date: "2026-04-15", Minutes: 25, Sprints: 1},
+	}
+	dupOut := FormatHeatmap(daily, 100, 2, 2, now, false)
+	if !strings.Contains(dupOut, "Active Days: 2/3 (95 min)") {
+		t.Errorf("expected summed duplicate dates 2/3 (95 min), got:\n%s", dupOut)
+	}
+
+	// 3. DST spring-forward window (if America/New_York tzdata is available) renders cleanly without week drift
+	if nyLoc, err := time.LoadLocation("America/New_York"); err == nil {
+		springEnd := time.Date(2026, 4, 15, 12, 0, 0, 0, nyLoc)
+		dstOut := FormatHeatmap(nil, 120, 0, 0, springEnd, false)
+		if !strings.Contains(dstOut, "90-Day Focus Contribution Heatmap (14 weeks") &&
+			!strings.Contains(dstOut, "90-Day Focus Contribution Heatmap (13 weeks") {
+			t.Errorf("unexpected DST heatmap week count:\n%s", dstOut)
+		}
+	}
+}

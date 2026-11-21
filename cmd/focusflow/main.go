@@ -24,7 +24,7 @@ import (
 )
 
 // Version is set at build time via -ldflags "-X main.Version=..."
-var Version = "2.3.0"
+var Version = "2.3.1"
 
 func main() {
 	os.Exit(runCLI(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -2135,6 +2135,21 @@ func runScheduleDaemonWithSignals(
 		return 1
 	}
 
+	var strictOverride engine.StrictnessLevel
+	if rawStrict := strings.ToLower(strings.TrimSpace(*strictness)); rawStrict != "" {
+		switch rawStrict {
+		case "hardcore":
+			strictOverride = engine.StrictnessHardcore
+		case "relaxed":
+			strictOverride = engine.StrictnessRelaxed
+		case "standard":
+			strictOverride = engine.StrictnessStandard
+		default:
+			_, _ = fmt.Fprintf(stderr, "[ERR] Invalid --strict level %q (expected relaxed, standard, or hardcore).\n", *strictness)
+			return 1
+		}
+	}
+
 	if nowFn == nil {
 		nowFn = time.Now
 	}
@@ -2142,7 +2157,7 @@ func runScheduleDaemonWithSignals(
 	_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] FocusFlow scheduler daemon started (check-interval=%s | %s). Press Ctrl+C to stop.\n",
 		checkInterval, shieldModeString(engine.IsElevated()))
 
-	handledWindows := make(map[string]bool)
+	handledWindows := make(map[string]time.Time)
 	store, _ := storage.NewStore()
 	hosts := engine.NewHostsManager()
 	dns := &engine.DnsEngine{}
@@ -2157,25 +2172,22 @@ func runScheduleDaemonWithSignals(
 		if remTotal <= 0 {
 			return false
 		}
-		plannedMin := int((win.End.Sub(win.Start) + time.Second*30) / time.Minute)
+		plannedMin := int((remTotal + time.Second*30) / time.Minute)
 		if plannedMin < 1 {
 			plannedMin = 1
 		}
 
+		if _, exists := cfg.GetProfile(win.Rule.Profile); !exists {
+			_, _ = fmt.Fprintf(stderr, "  [WARN] Schedule '%s' references missing/deleted profile '%s'; falling back to 'study' profile.\n",
+				win.Rule.Name, win.Rule.Profile)
+		}
 		prof := profile.LoadOrDefault(win.Rule.Profile)
 		strictLevel := engine.StrictnessStandard
-		if prof.Name == "hardcore" && strings.TrimSpace(*strictness) == "" {
+		if prof.Name == "hardcore" && strictOverride == "" {
 			strictLevel = engine.StrictnessHardcore
 		}
-		if strings.TrimSpace(*strictness) != "" {
-			switch strings.ToLower(strings.TrimSpace(*strictness)) {
-			case "hardcore":
-				strictLevel = engine.StrictnessHardcore
-			case "relaxed":
-				strictLevel = engine.StrictnessRelaxed
-			case "standard":
-				strictLevel = engine.StrictnessStandard
-			}
+		if strictOverride != "" {
+			strictLevel = strictOverride
 		}
 
 		notifyEnabled := cfg.NotificationsEnabled && !*noNotify
@@ -2189,9 +2201,6 @@ func runScheduleDaemonWithSignals(
 
 		startUTC := now.UTC()
 		sessionID := storage.GenerateSessionID()
-		if store != nil {
-			_ = store.StartSession(sessionID, prof.Name, plannedMin, startUTC)
-		}
 
 		_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Entering window '%s' (profile=%s | until %s | session=%s)\n",
 			win.Rule.Name, prof.Name, win.End.Format("15:04"), sessionID)
@@ -2209,6 +2218,11 @@ func runScheduleDaemonWithSignals(
 			_ = dns.FlushResolverCache()
 		}
 
+		// Record running session AFTER engaging hosts + journal to avoid racing concurrent `focusflow stop`.
+		if store != nil {
+			_ = store.StartSession(sessionID, prof.Name, plannedMin, startUTC)
+		}
+
 		notifier.NotifySprintStart(prof.Name, plannedMin, 1, 1)
 		engine.RunHookSafe(effHooks.OnStart, engine.HookContext{
 			Event:     engine.HookEventStart,
@@ -2224,8 +2238,14 @@ func runScheduleDaemonWithSignals(
 		enforceTicker := time.NewTicker(enforceStep)
 		defer enforceTicker.Stop()
 
+		sleepThreshold := 2 * time.Minute
+		if 4*enforceStep > sleepThreshold {
+			sleepThreshold = 4 * enforceStep
+		}
+
 		blockedCount := 0
 		tickCount := 0
+		lastTick := now
 
 		for {
 			select {
@@ -2253,6 +2273,12 @@ func runScheduleDaemonWithSignals(
 			case <-enforceTicker.C:
 				tickCount++
 				if store != nil && !store.IsSessionRunning(sessionID) {
+					if hostsEngaged {
+						if j, err := hosts.LoadJournal(); err == nil && j != nil && j.SessionID == sessionID {
+							_ = hosts.Rollback()
+							_ = dns.FlushResolverCache()
+						}
+					}
 					_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Window '%s' stopped externally.\n", win.Rule.Name)
 					return false
 				}
@@ -2263,8 +2289,31 @@ func runScheduleDaemonWithSignals(
 						_ = hosts.Rollback()
 						_ = dns.FlushResolverCache()
 					}
+					endUTC := win.End.UTC()
+					wokeFromSleep := cur.Sub(lastTick) > sleepThreshold && cur.After(win.End.Add(sleepThreshold))
+					if wokeFromSleep {
+						awakeMin := int(lastTick.UTC().Sub(startUTC).Minutes())
+						if awakeMin < 0 {
+							awakeMin = 0
+						}
+						if awakeMin > plannedMin {
+							awakeMin = plannedMin
+						}
+						if store != nil {
+							_ = store.FinalizeSession(sessionID, prof.Name, awakeMin, false, "aborted", blockedCount, startUTC, endUTC)
+						}
+						engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
+							Event:     engine.HookEventEnd,
+							Profile:   prof.Name,
+							SessionID: sessionID,
+							Minutes:   awakeMin,
+						}, hookOpts, stderr)
+						_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] System sleep/wake detected past end of window '%s'; shield released cleanly.\n", win.Rule.Name)
+						return false
+					}
+
 					if store != nil {
-						_ = store.FinalizeSession(sessionID, prof.Name, plannedMin, true, "completed", blockedCount, startUTC, cur.UTC())
+						_ = store.FinalizeSession(sessionID, prof.Name, plannedMin, true, "completed", blockedCount, startUTC, endUTC)
 					}
 					notifier.NotifySessionComplete(prof.Name, 1, plannedMin)
 					engine.RunHookSafe(effHooks.OnEnd, engine.HookContext{
@@ -2276,6 +2325,7 @@ func runScheduleDaemonWithSignals(
 					_, _ = fmt.Fprintf(stdout, "  [SCHEDULER] Window '%s' complete; shield released cleanly.\n", win.Rule.Name)
 					return false
 				}
+				lastTick = cur
 
 				killed := procSup.ScanAndTerminate()
 				acKilled := antiCheat.Enforce()
@@ -2297,15 +2347,20 @@ func runScheduleDaemonWithSignals(
 			return false
 		}
 		now := nowFn()
+		for key, endAt := range handledWindows {
+			if now.After(endAt.Add(24 * time.Hour)) {
+				delete(handledWindows, key)
+			}
+		}
 		win := schedule.ActiveWindow(cfg.Schedules, now)
 		if win == nil {
 			return false
 		}
 		winKey := win.Rule.ID + "@" + win.Start.Format(time.RFC3339)
-		if handledWindows[winKey] {
+		if _, seen := handledWindows[winKey]; seen {
 			return false
 		}
-		handledWindows[winKey] = true
+		handledWindows[winKey] = win.End
 		return runWindow(win, cfg)
 	}
 

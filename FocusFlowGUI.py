@@ -1,5 +1,5 @@
 """
-FocusFlow v2.3.0 - Native Desktop Deep Work & Distraction Shield HUD
+FocusFlow v2.3.1 - Native Desktop Deep Work & Distraction Shield HUD
 Theme: Catppuccin Mocha Minimal Systems Architecture (Zero-Emoji)
 High-DPI Per-Monitor v2, Crash-Safe SHA-256 Hosts Engine, Win32 Toolhelp32 Supervisor
 """
@@ -594,6 +594,20 @@ class FocusFlowGUI:
             self.refresh_analytics_ui()
         elif selected == str(self.tab_blocks):
             self.refresh_lists()
+        elif selected == str(self.tab_settings):
+            self.config_store = load_config(state_dir=self.state_dir)
+            if hasattr(self, "spin_daily_goal"):
+                self.spin_daily_goal.set(int(self.config_store.daily_goal_minutes))
+            if hasattr(self, "notify_var"):
+                self.notify_var.set(bool(self.config_store.notifications_enabled))
+            if hasattr(self, "lbl_automation_sync"):
+                hooks_summary = (
+                    f"start={'on' if self.config_store.hooks.on_start else 'off'}, "
+                    f"end={'on' if self.config_store.hooks.on_end else 'off'}"
+                )
+                self.lbl_automation_sync.config(
+                    text=f"CLI Automation Sync: {len(self.config_store.schedules)} recurring schedule(s) | Lifecycle hooks ({hooks_summary})"
+                )
         elif selected == str(self.tab_timer) and not self.is_active:
             self.config_store = load_config(state_dir=self.state_dir)
             valid_profiles = set(self.config_store.profiles.keys()) | {"study", "dev", "hardcore"}
@@ -1317,6 +1331,13 @@ class FocusFlowGUI:
         self.heatmap_canvas = tk.Canvas(heatmap_card, bg=THEME["mantle"], height=148, highlightthickness=0)
         self.heatmap_canvas.pack(fill="x")
         self.heatmap_canvas.bind("<Configure>", lambda _e: self.draw_heatmap_panel())
+        self.heatmap_canvas.bind(
+            "<Leave>",
+            lambda _e: self.lbl_heatmap_meta.config(
+                text=getattr(self, "_heatmap_default_meta", "Longest Streak: 0 Days | Hover cell for details"),
+                fg=THEME["subtext"],
+            ),
+        )
 
         btn_bar = tk.Frame(f, bg=THEME["base"])
         btn_bar.pack(fill="x", pady=6)
@@ -1361,9 +1382,10 @@ class FocusFlowGUI:
         ).pack(side="right", padx=6)
 
     def refresh_analytics_ui(self) -> None:
-        summary90 = self.session_store.compute_analytics(days=90)
+        now_local = datetime.datetime.now().astimezone()
+        summary90 = self.session_store.compute_analytics(days=90, now=now_local)
         self._latest_summary_90 = summary90
-        summary = self.session_store.compute_analytics(days=7)
+        summary = self.session_store.compute_analytics(days=7, now=now_local)
         self._latest_summary = summary
 
         streak_unit = "DAY" if summary.active_streak_days == 1 else "DAYS"
@@ -1410,20 +1432,29 @@ class FocusFlowGUI:
         goal = summary.daily_goal_minutes
         by_date = {d.date: (d.minutes, d.sprints) for d in daily}
 
-        today = datetime.date.today()
-        window_days = max(1, len(daily))
-        start_day = today - datetime.timedelta(days=window_days - 1)
+        end_day = datetime.date.today()
+        if daily:
+            try:
+                end_day = datetime.date.fromisoformat(daily[-1].date)
+            except ValueError:
+                pass
+        window_days = len(daily) if daily else 90
+        start_day = end_day - datetime.timedelta(days=window_days - 1)
         grid_start = start_day - datetime.timedelta(days=start_day.weekday())
-        grid_end = today + datetime.timedelta(days=6 - today.weekday())
+        grid_end = end_day + datetime.timedelta(days=6 - end_day.weekday())
         num_weeks = max(1, ((grid_end - grid_start).days + 1 + 6) // 7)
 
         left_pad = 44
         top_pad = 22
         bottom_pad = 22
-        cell_gap = 3
         avail_h = max(40, h - top_pad - bottom_pad)
-        avail_w = max(120, w - left_pad - 24)
-        cell_size = max(8, min(14, (avail_h - 6 * cell_gap) // 7, (avail_w - (num_weeks - 1) * cell_gap) // num_weeks))
+        avail_w = max(80, w - left_pad - 24)
+        cell_gap = 3
+        raw_cell = min(14, (avail_h - 6 * cell_gap) // 7, (avail_w - (num_weeks - 1) * cell_gap) // num_weeks)
+        if raw_cell < 8:
+            cell_gap = 2
+            raw_cell = min(14, (avail_h - 6 * cell_gap) // 7, (avail_w - (num_weeks - 1) * cell_gap) // num_weeks)
+        cell_size = max(4, raw_cell)
         step = cell_size + cell_gap
         grid_w = num_weeks * step - cell_gap
         origin_x = max(left_pad, (w - grid_w) // 2)
@@ -1448,7 +1479,7 @@ class FocusFlowGUI:
             ref_day = week_mon
             for offset in range(7):
                 cand = week_mon + datetime.timedelta(days=offset)
-                if start_day <= cand <= today and (cand.day == 1 or offset == 0):
+                if start_day <= cand <= end_day and (cand.day == 1 or offset == 0):
                     ref_day = cand
                     if cand.day == 1:
                         break
@@ -1468,7 +1499,7 @@ class FocusFlowGUI:
 
             for row in range(7):
                 cell_date = week_mon + datetime.timedelta(days=row)
-                if cell_date < start_day or cell_date > today:
+                if cell_date < start_day or cell_date > end_day:
                     continue
                 d_str = cell_date.strftime("%Y-%m-%d")
                 mins, sprints = by_date.get(d_str, (0, 0))
@@ -1499,9 +1530,10 @@ class FocusFlowGUI:
                     ),
                 )
 
-        # Compact legend aligned bottom-right of grid
-        legend_y = top_pad + 7 * step + 5
-        lx = origin_x + grid_w - 118
+        # Compact legend aligned bottom-right of grid, clamped inside canvas bounds
+        legend_y = min(h - 14, top_pad + 7 * step + 5)
+        max_lx = max(left_pad + 36, w - len(HEATMAP_COLORS) * 14 - 38)
+        lx = max(left_pad + 36, min(max_lx, origin_x + grid_w - 118))
         self.heatmap_canvas.create_text(
             lx - 4,
             legend_y + 5,

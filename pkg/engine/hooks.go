@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,8 +24,9 @@ const (
 )
 
 var (
-	ErrRootHookRefused = errors.New("refusing to execute lifecycle hook as root without SUDO_UID; pass --allow-root-hooks to override")
-	ErrHookTimeout     = errors.New("lifecycle hook timed out")
+	ErrRootHookRefused    = errors.New("refusing to execute lifecycle hook as root without SUDO_UID; pass --allow-root-hooks to override")
+	ErrHookTimeout        = errors.New("lifecycle hook timed out")
+	ErrInvalidHookCommand = errors.New("lifecycle hook command contains invalid NUL byte")
 )
 
 // HooksConfig persists user-configured shell hooks in config.json.
@@ -80,7 +83,7 @@ func ResolvePosixHookPrivilege(euid int, sudoUID, sudoGID string, allowRootHooks
 	if su != "" && sg != "" {
 		u64, uErr := strconv.ParseUint(su, 10, 32)
 		g64, gErr := strconv.ParseUint(sg, 10, 32)
-		if uErr == nil && gErr == nil && u64 > 0 {
+		if uErr == nil && gErr == nil && u64 > 0 && g64 > 0 && u64 < math.MaxUint32 && g64 < math.MaxUint32 {
 			return true, uint32(u64), uint32(g64), nil
 		}
 	}
@@ -117,11 +120,14 @@ func buildHookEnv(baseEnv []string, hctx HookContext) []string {
 }
 
 type limitedBuffer struct {
+	mu  sync.Mutex
 	buf bytes.Buffer
 	max int
 }
 
 func (l *limitedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	origLen := len(p)
 	if l.buf.Len() < l.max {
 		rem := l.max - l.buf.Len()
@@ -133,9 +139,18 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 	return origLen, nil
 }
 
+func (l *limitedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
 // RunLifecycleHook executes a single lifecycle hook command with strict timeout enforcement,
 // structured FOCUSFLOW_* environment variables, and POSIX root privilege dropping.
 func RunLifecycleHook(ctx context.Context, command string, hctx HookContext, opts HookOptions) (string, error) {
+	if strings.ContainsRune(command, '\x00') {
+		return "", ErrInvalidHookCommand
+	}
 	trimmed := strings.TrimSpace(command)
 	if trimmed == "" {
 		return "", nil
@@ -168,7 +183,7 @@ func RunLifecycleHook(ctx context.Context, command string, hctx HookContext, opt
 	cmd.WaitDelay = 250 * time.Millisecond
 
 	runErr := cmd.Run()
-	output := strings.TrimSpace(outBuf.buf.String())
+	output := strings.TrimSpace(outBuf.String())
 
 	if errors.Is(tctx.Err(), context.DeadlineExceeded) {
 		return output, fmt.Errorf("%w (%s)", ErrHookTimeout, timeout)

@@ -556,20 +556,21 @@ func parseSessionLocalDate(ts string, loc *time.Location) (string, bool) {
 	if ts == "" {
 		return "", false
 	}
-	layouts := []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04:05",
-		"2006-01-02",
+	if loc == nil {
+		loc = time.Local
 	}
-	for _, layout := range layouts {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, ts); err == nil {
-			if layout == "2006-01-02" {
-				return t.Format("2006-01-02"), true
-			}
 			return t.In(loc).Format("2006-01-02"), true
 		}
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, ts, loc); err == nil {
+			return t.Format("2006-01-02"), true
+		}
+	}
+	if t, err := time.Parse("2006-01-02", ts); err == nil {
+		return t.Format("2006-01-02"), true
 	}
 	if len(ts) >= 10 && ts[4] == '-' && ts[7] == '-' {
 		return ts[:10], true

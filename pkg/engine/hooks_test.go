@@ -40,6 +40,44 @@ func TestResolvePosixHookPrivilege(t *testing.T) {
 	if err != nil || drop {
 		t.Fatalf("pure root with allowRootHooks=true: got drop=%v err=%v", drop, err)
 	}
+
+	// 6. Hardened edge cases: GID=0 (root/wheel), MaxUint32 ((uid_t)-1), missing GID, negative/garbage
+	badCases := [][2]string{
+		{"1000", "0"},
+		{"0", "1000"},
+		{"4294967295", "1000"},
+		{"1000", "4294967295"},
+		{"1000", ""},
+		{"-1", "1000"},
+		{"not-a-uid", "1000"},
+	}
+	for _, tc := range badCases {
+		if _, _, _, err := ResolvePosixHookPrivilege(0, tc[0], tc[1], false); !errors.Is(err, ErrRootHookRefused) {
+			t.Errorf("ResolvePosixHookPrivilege(0, %q, %q, false) expected ErrRootHookRefused, got %v", tc[0], tc[1], err)
+		}
+	}
+}
+
+func TestRunLifecycleHook_NULRejectionQuotingAndMultiline(t *testing.T) {
+	// 1. NUL byte rejected
+	if _, err := RunLifecycleHook(context.Background(), "echo hi\x00evil", HookContext{Event: HookEventStart}, HookOptions{Timeout: time.Second}); !errors.Is(err, ErrInvalidHookCommand) {
+		t.Fatalf("expected ErrInvalidHookCommand for NUL byte, got %v", err)
+	}
+
+	// 2. Quoted arguments & multiline hook command execute cleanly
+	var quotedCmd string
+	if runtime.GOOS == "windows" {
+		quotedCmd = "echo \"hello world\"\necho \"second line\""
+	} else {
+		quotedCmd = "echo \"hello world\"\necho \"second line\""
+	}
+	out, err := RunLifecycleHook(context.Background(), quotedCmd, HookContext{Event: HookEventStart}, HookOptions{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("quoted multiline hook failed: %v", err)
+	}
+	if !strings.Contains(out, "hello world") || !strings.Contains(out, "second line") {
+		t.Errorf("unexpected quoted multiline output: %q", out)
+	}
 }
 
 func TestRunLifecycleHook_EnvVarsTimeoutAndSafeWarning(t *testing.T) {

@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title FocusFlow v2.3.0 - Desktop HUD Launcher
+title FocusFlow v2.3.1 - Desktop HUD Launcher
 cd /d "%~dp0"
 
 where pythonw >nul 2>nul
